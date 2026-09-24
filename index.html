@@ -1,299 +1,227 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Monkey Arena V1</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Monkey Arena V2</title>
+<script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
 
-  <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
-
-  <style>
-    body {
-      margin: 0;
-      font-family: Arial, sans-serif;
-      overflow: hidden;
-    }
-
-    #menu {
-      position: fixed;
-      top: 15px;
-      left: 15px;
-      z-index: 10;
-      background: rgba(0,0,0,.75);
-      color: white;
-      padding: 14px;
-      border-radius: 15px;
-      width: 190px;
-    }
-
-    #menu h2 {
-      margin: 0 0 10px;
-      font-size: 20px;
-    }
-
-    button {
-      width: 100%;
-      margin: 5px 0;
-      padding: 10px;
-      border: 0;
-      border-radius: 10px;
-      font-weight: bold;
-      background: #333;
-      color: white;
-    }
-
-    button.on {
-      background: #16a34a;
-    }
-
-    #score {
-      margin-top: 8px;
-      font-size: 16px;
-    }
-
-    #jump {
-      position: fixed;
-      right: 20px;
-      bottom: 25px;
-      z-index: 20;
-      width: 90px;
-      height: 90px;
-      border-radius: 50%;
-      background: #7c3aed;
-      color: white;
-      font-size: 18px;
-    }
-  </style>
+<style>
+body{margin:0;overflow:hidden;font-family:Arial}
+#menu{
+position:fixed;z-index:20;top:12px;left:12px;width:210px;
+padding:14px;border-radius:16px;background:#111d;color:white
+}
+h2{margin:0 0 10px}
+button{
+width:100%;padding:10px;margin:4px 0;border:0;border-radius:10px;
+background:#303030;color:white;font-weight:bold
+}
+.on{background:#16a34a!important}
+#jump{
+position:fixed;z-index:20;right:20px;bottom:25px;
+width:90px;height:90px;border-radius:50%;
+background:#7c3aed;color:white;font-weight:bold
+}
+</style>
 </head>
 
 <body>
 
 <div id="menu">
-  <h2>🦍 MONKEY ARENA</h2>
-
-  <button id="speedBtn">⚡ Speed: OFF</button>
-  <button id="jumpBtn">🦘 Super Jump: OFF</button>
-
-  <div id="score">🍌 Bananas: 0</div>
+<h2>🦍 MONKEY ARENA</h2>
+<button id="speed">⚡ Speed: OFF</button>
+<button id="super">🦘 Super Jump: OFF</button>
+<button id="ghost">👻 Ghost: OFF</button>
+<button id="arms">💪 Long Arms: OFF</button>
+<div>🍌 Bananas: <span id="score">0</span></div>
 </div>
 
 <button id="jump">JUMP</button>
 
 <a-scene
-  background="color: #10151b"
-  vr-mode-ui="enabled: true"
-  renderer="colorManagement: true">
+background="color:#87ceeb"
+vr-mode-ui="enabled:true"
+renderer="colorManagement:true">
 
-  <!-- LIGHTING -->
-  <a-light type="ambient" intensity="1"></a-light>
-  <a-light
-    type="directional"
-    intensity="1.5"
-    position="5 10 5">
-  </a-light>
+<a-light type="ambient" intensity="1.2"></a-light>
+<a-light type="directional" intensity="1.5" position="5 10 5"></a-light>
 
-  <!-- PLAYER -->
-  <a-entity
-    id="player"
-    position="0 1.6 8"
-    wasd-controls="acceleration: 25"
-    look-controls>
+<!-- PLAYER -->
+<a-entity id="player" position="0 1.6 8">
 
-    <a-camera></a-camera>
+<a-camera wasd-controls="acceleration:25" look-controls></a-camera>
 
-    <!-- Left hand -->
-    <a-entity
-      laser-controls="hand: left"
-      raycaster="objects: .clickable">
-    </a-entity>
+<!-- HANDS -->
+<a-sphere id="leftHand"
+position="-0.45 -0.25 -0.7"
+radius=".14"
+color="#8b5a2b"></a-sphere>
 
-    <!-- Right hand -->
-    <a-entity
-      laser-controls="hand: right"
-      raycaster="objects: .clickable">
-    </a-entity>
+<a-sphere id="rightHand"
+position="0.45 -0.25 -0.7"
+radius=".14"
+color="#8b5a2b"></a-sphere>
 
-  </a-entity>
+</a-entity>
 
-  <!-- FLOOR -->
-  <a-plane
-    rotation="-90 0 0"
-    width="50"
-    height="50"
-    color="#293241">
-  </a-plane>
+<!-- GROUND -->
+<a-plane
+rotation="-90 0 0"
+width="60"
+height="60"
+color="#3f6212"></a-plane>
 
-  <!-- START PLATFORM -->
-  <a-box
-    position="0 .5 8"
-    width="8"
-    height="1"
-    depth="8"
-    color="#4b5563">
-  </a-box>
+<!-- SPAWN -->
+<a-cylinder position="0 .4 8"
+radius="4" height=".8" color="#6b7280"></a-cylinder>
 
-  <!-- PLATFORMS -->
-  <a-box position="-7 2 0" width="5" height="1" depth="5" color="#6366f1"></a-box>
-  <a-box position="7 3 -5" width="5" height="1" depth="5" color="#ec4899"></a-box>
-  <a-box position="-5 4 -9" width="5" height="1" depth="5" color="#22c55e"></a-box>
-  <a-box position="5 5 -15" width="5" height="1" depth="5" color="#f59e0b"></a-box>
+<!-- PARKOUR -->
+<a-box position="-7 2 0" width="5" height="1" depth="5" color="#6366f1"></a-box>
+<a-box position="7 3 -5" width="5" height="1" depth="5" color="#ec4899"></a-box>
+<a-box position="-6 4 -10" width="5" height="1" depth="5" color="#22c55e"></a-box>
+<a-box position="5 5 -16" width="5" height="1" depth="5" color="#f59e0b"></a-box>
+<a-box position="-4 6 -22" width="5" height="1" depth="5" color="#ef4444"></a-box>
 
-  <!-- WALLS -->
-  <a-box position="-12 2 -5" width="1" height="4" depth="30" color="#374151"></a-box>
-  <a-box position="12 2 -5" width="1" height="4" depth="30" color="#374151"></a-box>
+<!-- WALLS -->
+<a-box position="-15 3 -8" width="1" height="6" depth="40" color="#374151"></a-box>
+<a-box position="15 3 -8" width="1" height="6" depth="40" color="#374151"></a-box>
 
-  <!-- BANANAS -->
-  <a-entity class="banana" position="-7 3 0">
-    <a-torus
-      radius="0.35"
-      radius-tubular="0.12"
-      rotation="90 0 0"
-      color="#facc15">
-    </a-torus>
-  </a-entity>
+<!-- TREES -->
+<a-cylinder position="-11 3 -8" radius="1" height="6" color="#78350f"></a-cylinder>
+<a-sphere position="-11 7 -8" radius="3" color="#15803d"></a-sphere>
 
-  <a-entity class="banana" position="7 4 -5">
-    <a-torus
-      radius="0.35"
-      radius-tubular="0.12"
-      rotation="90 0 0"
-      color="#facc15">
-    </a-torus>
-  </a-entity>
+<a-cylinder position="11 3 -15" radius="1" height="6" color="#78350f"></a-cylinder>
+<a-sphere position="11 7 -15" radius="3" color="#15803d"></a-sphere>
 
-  <a-entity class="banana" position="-5 5 -9">
-    <a-torus
-      radius="0.35"
-      radius-tubular="0.12"
-      rotation="90 0 0"
-      color="#facc15">
-    </a-torus>
-  </a-entity>
+<a-cylinder position="-10 3 -25" radius="1" height="6" color="#78350f"></a-cylinder>
+<a-sphere position="-10 7 -25" radius="3" color="#15803d"></a-sphere>
 
-  <a-entity class="banana" position="5 6 -15">
-    <a-torus
-      radius="0.35"
-      radius-tubular="0 0"
-      color="#facc15">
-    </a-torus>
-  </a-entity>
+<!-- BANANAS -->
+<a-torus class="banana" position="-7 3 0"
+radius=".4" radius-tubular=".12" color="#ffe600"></a-torus>
 
-  <!-- TREES -->
-  <a-cylinder
-    position="-10 3 -10"
-    radius="1"
-    height="6"
-    color="#78350f">
-  </a-cylinder>
+<a-torus class="banana" position="7 4 -5"
+radius=".4" radius-tubular=".12" color="#ffe600"></a-torus>
 
-  <a-sphere
-    position="-10 7 -10"
-    radius="3"
-    color="#15803d">
-  </a-sphere>
+<a-torus class="banana" position="-6 5 -10"
+radius=".4" radius-tubular=".12" color="#ffe600"></a-torus>
 
-  <a-cylinder
-    position="10 3 -18"
-    radius="1"
-    height="6"
-    color="#78350f">
-  </a-cylinder>
+<a-torus class="banana" position="5 6 -16"
+radius=".4" radius-tubular=".12" color="#ffe600"></a-torus>
 
-  <a-sphere
-    position="10 7 -18"
-    radius="3"
-    color="#15803d">
-  </a-sphere>
+<a-torus class="banana" position="-4 7 -22"
+radius=".4" radius-tubular=".12" color="#ffe600"></a-torus>
+
+<!-- JUMP PAD -->
+<a-cylinder
+id="pad"
+position="0 .25 -5"
+radius="2"
+height=".5"
+color="#9333ea">
+</a-cylinder>
+
+<a-text
+value="SUPER JUMP PAD"
+align="center"
+position="0 .55 -5"
+scale="1.5 1.5 1.5"
+color="white"></a-text>
 
 </a-scene>
 
 <script>
-  const player = document.getElementById("player");
-  const speedBtn = document.getElementById("speedBtn");
-  const jumpBtn = document.getElementById("jumpBtn");
-  const jumpButton = document.getElementById("jump");
-  const scoreText = document.getElementById("score");
+const player=document.querySelector("#player");
+const camera=document.querySelector("a-camera");
+const left=document.querySelector("#leftHand");
+const right=document.querySelector("#rightHand");
 
-  let speedOn = false;
-  let superJump = false;
-  let bananas = 0;
-  let jumping = false;
+let speed=false;
+let superJump=false;
+let ghost=false;
+let longArms=false;
+let score=0;
+let jumping=false;
 
-  speedBtn.onclick = () => {
-    speedOn = !speedOn;
+function toggle(button,state,text){
+state=!state;
+button.textContent=text+(state?"ON":"OFF");
+button.classList.toggle("on",state);
+return state;
+}
 
-    speedBtn.textContent =
-      speedOn ? "⚡ Speed: ON" : "⚡ Speed: OFF";
+document.querySelector("#speed").onclick=()=>{
+speed=toggle(document.querySelector("#speed"),speed,"⚡ Speed: ");
+camera.setAttribute("wasd-controls",
+"acceleration:"+(speed?80:25));
+};
 
-    speedBtn.classList.toggle("on", speedOn);
+document.querySelector("#super").onclick=()=>{
+superJump=toggle(document.querySelector("#super"),superJump,"🦘 Super Jump: ");
+};
 
-    player.setAttribute(
-      "wasd-controls",
-      "acceleration",
-      speedOn ? 80 : 25
-    );
-  };
+document.querySelector("#ghost").onclick=()=>{
+ghost=toggle(document.querySelector("#ghost"),ghost,"👻 Ghost: ");
+player.setAttribute("opacity",ghost?".45":"1");
+};
 
-  jumpBtn.onclick = () => {
-    superJump = !superJump;
+document.querySelector("#arms").onclick=()=>{
+longArms=toggle(document.querySelector("#arms"),longArms,"💪 Long Arms: ");
 
-    jumpBtn.textContent =
-      superJump ? "🦘 Super Jump: ON" : "🦘 Super Jump: OFF";
+left.setAttribute("position",longArms?"-1 -0.25 -1":"-0.45 -0.25 -0.7");
+right.setAttribute("position",longArms?"1 -0.25 -1":"0.45 -0.25 -0.7");
+};
 
-    jumpBtn.classList.toggle("on", superJump);
-  };
+function jump(){
+if(jumping)return;
+jumping=true;
 
-  function jump() {
-    if (jumping) return;
+let start=player.object3D.position.y;
+let height=superJump?5:2;
 
-    jumping = true;
+let startTime=null;
 
-    const startY = player.object3D.position.y;
-    const height = superJump ? 5 : 2;
-    const duration = superJump ? 650 : 450;
+function animate(t){
+if(!startTime)startTime=t;
+let p=(t-startTime)/700;
 
-    let start = null;
+if(p<1){
+player.object3D.position.y=start+Math.sin(p*Math.PI)*height;
+requestAnimationFrame(animate);
+}else{
+player.object3D.position.y=start;
+jumping=false;
+}
+}
+requestAnimationFrame(animate);
+}
 
-    function animate(time) {
-      if (!start) start = time;
+document.querySelector("#jump").onclick=jump;
 
-      const progress = (time - start) / duration;
+document.addEventListener("keydown",e=>{
+if(e.code==="Space")jump();
+});
 
-      if (progress < 1) {
-        const y = startY + Math.sin(progress * Math.PI) * height;
-        player.object3D.position.y = y;
-        requestAnimationFrame(animate);
-      } else {
-        player.object3D.position.y = startY;
-        jumping = false;
-      }
-    }
+document.querySelector("#pad").addEventListener("mouseenter",()=>{
+if(superJump)jump();
+});
 
-    requestAnimationFrame(animate);
-  }
+document.querySelectorAll(".banana").forEach(b=>{
+b.addEventListener("click",()=>{
+if(b.getAttribute("visible")===false)return;
 
-  jumpButton.onclick = jump;
+b.setAttribute("visible",false);
+score++;
+document.querySelector("#score").textContent=score;
+});
+});
 
-  document.addEventListener("keydown", e => {
-    if (e.code === "Space") jump();
-  });
-
-  // Banana collection
-  document.querySelectorAll(".banana").forEach(banana => {
-    banana.addEventListener("click", () => {
-      banana.setAttribute("visible", "false");
-
-      bananas++;
-      scoreText.textContent = "🍌 Bananas: " + bananas;
-    });
-  });
-
-  // Rotate bananas
-  setInterval(() => {
-    document.querySelectorAll(".banana").forEach(banana => {
-      banana.object3D.rotation.y += 0.08;
-    });
-  }, 30);
+setInterval(()=>{
+document.querySelectorAll(".banana").forEach(b=>{
+b.object3D.rotation.y+=.08;
+});
+},30);
 </script>
 
 </body>

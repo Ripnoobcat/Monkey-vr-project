@@ -15811,6 +15811,9643 @@ setTimeout(
   }
 
 })();
+/* =========================================================
+   MONKEY VR — PART 7
+   MULTIPLAYER CLIENT 2.0
+   ROOMS • PLAYERS • SMOOTHING • TEAMS • ROUNDS
+   SPECTATOR • VOTING • RECONNECT • CROSS-PLATFORM
+   ========================================================= */
+
+(function () {
+  "use strict";
+
+  if (window.MonkeyVRPart7) return;
+  window.MonkeyVRPart7 = true;
+
+  const M7 = {
+    initialized: false,
+
+    connection: {
+      connected: false,
+      connecting: false,
+      reconnecting: false,
+      attempts: 0,
+      maxAttempts: 8,
+      lastHeartbeat: 0,
+      lastPacket: 0,
+      ping: 0,
+      serverTimeOffset: 0
+    },
+
+    room: {
+      code: "",
+      name: "Public Room",
+      maxPlayers: 10,
+      isPrivate: false,
+      ownerId: null,
+      state: "lobby",
+
+      map: "Forest",
+      mode: "Casual",
+
+      round: 1,
+      maxRounds: 3,
+      roundTime: 180,
+
+      scoreLimit: 10,
+
+      started: false,
+      countdown: 0
+    },
+
+    localPlayer: {
+      id: "",
+      username: "Monkey",
+      platform: "unknown",
+
+      team: "none",
+
+      ready: false,
+      spectator: false,
+
+      tagger: false,
+      frozen: false,
+
+      score: 0,
+      roundScore: 0,
+
+      position: {
+        x: 0,
+        y: 1,
+        z: 0
+      },
+
+      rotation: {
+        x: 0,
+        y: 0,
+        z: 0
+      },
+
+      velocity: {
+        x: 0,
+        y: 0,
+        z: 0
+      }
+    },
+
+    players: new Map(),
+
+    teams: {
+      red: [],
+      blue: [],
+      green: [],
+      yellow: []
+    },
+
+    voting: {
+      active: false,
+      choices: [],
+      votes: {},
+      endsAt: 0
+    },
+
+    spectator: {
+      active: false,
+      targetId: null,
+      index: 0
+    },
+
+    reconnect: {
+      enabled: true,
+      nextAttempt: 0
+    },
+
+    packets: {
+      sent: 0,
+      received: 0,
+      dropped: 0
+    },
+
+    interpolation: {
+      enabled: true,
+      delay: 100,
+      maxExtrapolation: 250
+    },
+
+    settings: {
+      showNames: true,
+      showPlatforms: true,
+      showPing: true,
+      smoothPlayers: true
+    }
+  };
+
+  /* ========================================================
+     HELPERS
+     ======================================================== */
+
+  function scene() {
+    return document.querySelector(
+      "a-scene"
+    );
+  }
+
+  function rig() {
+    return (
+      document.querySelector("#rig") ||
+      document.querySelector("#player") ||
+      document.querySelector("#cameraRig")
+    );
+  }
+
+  function camera() {
+    return document.querySelector(
+      "[camera]"
+    );
+  }
+
+  function notify7(
+    text,
+    duration = 2200
+  ) {
+    if (
+      typeof msg === "function"
+    ) {
+      msg(
+        text,
+        duration
+      );
+    } else {
+      console.log(
+        "[MonkeyVR MP]",
+        text
+      );
+    }
+  }
+
+  function clamp(
+    value,
+    min,
+    max
+  ) {
+    return Math.max(
+      min,
+      Math.min(
+        max,
+        value
+      )
+    );
+  }
+
+  function lerp(
+    a,
+    b,
+    amount
+  ) {
+    return (
+      a +
+      (
+        b - a
+      ) *
+      amount
+    );
+  }
+
+  function distance(
+    a,
+    b
+  ) {
+    const dx =
+      a.x - b.x;
+
+    const dy =
+      a.y - b.y;
+
+    const dz =
+      a.z - b.z;
+
+    return Math.sqrt(
+      dx * dx +
+      dy * dy +
+      dz * dz
+    );
+  }
+
+  function now() {
+    return performance.now();
+  }
+
+  function makeId(
+    prefix = "p"
+  ) {
+    return (
+      prefix +
+      "_" +
+      Date.now()
+        .toString(36) +
+      "_" +
+      Math.random()
+        .toString(36)
+        .slice(2, 8)
+    );
+  }
+
+  /* ========================================================
+     PLATFORM DETECTION
+     ======================================================== */
+
+  function detectPlatform() {
+    const ua =
+      navigator.userAgent
+        .toLowerCase();
+
+    if (
+      navigator.xr &&
+      /quest|oculus|meta/i.test(
+        ua
+      )
+    ) {
+      return "quest";
+    }
+
+    if (
+      navigator.xr
+    ) {
+      return "vr";
+    }
+
+    if (
+      /iphone|ipad|ipod/.test(
+        ua
+      )
+    ) {
+      return "ios";
+    }
+
+    if (
+      /android/.test(
+        ua
+      )
+    ) {
+      return "android";
+    }
+
+    if (
+      /windows|macintosh|linux/.test(
+        ua
+      )
+    ) {
+      return "pc";
+    }
+
+    return "browser";
+  }
+
+  /* ========================================================
+     LOCAL PLAYER ID
+     ======================================================== */
+
+  function loadPlayerIdentity() {
+    let id =
+      localStorage.getItem(
+        "monkeyVR_player_id"
+      );
+
+    if (!id) {
+      id =
+        makeId(
+          "player"
+        );
+
+      localStorage.setItem(
+        "monkeyVR_player_id",
+        id
+      );
+    }
+
+    M7.localPlayer.id =
+      id;
+
+    M7.localPlayer.platform =
+      detectPlatform();
+
+    if (
+      typeof M4 !==
+      "undefined" &&
+      M4.username
+    ) {
+      M7.localPlayer.username =
+        M4.username;
+    }
+  }
+
+  /* ========================================================
+     PACKET SYSTEM
+     ======================================================== */
+
+  function packet(
+    type,
+    data = {}
+  ) {
+    return {
+      v: 2,
+      type,
+      sender:
+        M7.localPlayer.id,
+      timestamp:
+        Date.now(),
+      data
+    };
+  }
+
+  function sendPacket(
+    type,
+    data = {}
+  ) {
+    const p =
+      packet(
+        type,
+        data
+      );
+
+    M7.packets.sent++;
+
+    /*
+     * Connect to an existing Part 4
+     * networking layer when available.
+     */
+    if (
+      typeof MonkeyVROnline !==
+      "undefined"
+    ) {
+      try {
+
+        if (
+          typeof MonkeyVROnline
+            .sendPacket ===
+          "function"
+        ) {
+          MonkeyVROnline
+            .sendPacket(
+              p
+            );
+
+          return true;
+        }
+
+      } catch (err) {}
+    }
+
+    /*
+     * No backend:
+     * retain the packet locally.
+     */
+    M7.connection.lastPacket =
+      Date.now();
+
+    return false;
+  }
+
+  /* ========================================================
+     LOCAL ROOM
+     ======================================================== */
+
+  function generateRoomCode() {
+    const chars =
+      "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+    let code = "";
+
+    for (
+      let i = 0;
+      i < 6;
+      i++
+    ) {
+      code +=
+        chars[
+          Math.floor(
+            Math.random() *
+            chars.length
+          )
+        ];
+    }
+
+    return code;
+  }
+
+  function createRoom(
+    options = {}
+  ) {
+    M7.room.code =
+      generateRoomCode();
+
+    M7.room.name =
+      options.name ||
+      "Public Room";
+
+    M7.room.maxPlayers =
+      clamp(
+        Number(
+          options.maxPlayers
+        ) || 10,
+        2,
+        50
+      );
+
+    M7.room.isPrivate =
+      !!options.private;
+
+    M7.room.ownerId =
+      M7.localPlayer.id;
+
+    M7.room.map =
+      options.map ||
+      "Forest";
+
+    M7.room.mode =
+      options.mode ||
+      "Casual";
+
+    M7.room.state =
+      "lobby";
+
+    M7.room.started =
+      false;
+
+    M7.localPlayer.ready =
+      false;
+
+    sendPacket(
+      "room_create",
+      {
+        code:
+          M7.room.code,
+
+        name:
+          M7.room.name,
+
+        maxPlayers:
+          M7.room.maxPlayers,
+
+        private:
+          M7.room.isPrivate,
+
+        map:
+          M7.room.map,
+
+        mode:
+          M7.room.mode
+      }
+    );
+
+    notify7(
+      "🏠 Room created: " +
+      M7.room.code,
+      3500
+    );
+
+    return M7.room.code;
+  }
+
+  function joinRoom(
+    code
+  ) {
+    code =
+      String(
+        code || ""
+      )
+        .toUpperCase()
+        .replace(
+          /[^A-Z0-9]/g,
+          ""
+        )
+        .slice(
+          0,
+          8
+        );
+
+    if (
+      code.length <
+      4
+    ) {
+      notify7(
+        "❌ Invalid room code."
+      );
+
+      return false;
+    }
+
+    M7.room.code =
+      code;
+
+    M7.room.state =
+      "lobby";
+
+    sendPacket(
+      "room_join",
+      {
+        code
+      }
+    );
+
+    notify7(
+      "🔗 Joining " +
+      code +
+      "..."
+    );
+
+    return true;
+  }
+
+  function leaveRoom() {
+    if (
+      !M7.room.code
+    ) return;
+
+    sendPacket(
+      "room_leave",
+      {
+        code:
+          M7.room.code
+      }
+    );
+
+    clearRemotePlayers();
+
+    M7.room.code =
+      "";
+
+    M7.room.started =
+      false;
+
+    M7.room.state =
+      "menu";
+
+    notify7(
+      "👋 Left room."
+    );
+  }
+
+  /* ========================================================
+     PLAYER OBJECT
+     ======================================================== */
+
+  function createRemotePlayer(
+    data
+  ) {
+    if (
+      !data ||
+      !data.id
+    ) {
+      return null;
+    }
+
+    if (
+      M7.players.has(
+        data.id
+      )
+    ) {
+      return M7.players.get(
+        data.id
+      );
+    }
+
+    const s =
+      scene();
+
+    if (!s) return null;
+
+    const root =
+      document.createElement(
+        "a-entity"
+      );
+
+    root.id =
+      "m7-player-" +
+      data.id;
+
+    const body =
+      document.createElement(
+        "a-sphere"
+      );
+
+    body.setAttribute(
+      "radius",
+      ".45"
+    );
+
+    body.setAttribute(
+      "position",
+      "0 0 0"
+    );
+
+    body.setAttribute(
+      "material",
+      "color:#ffffff"
+    );
+
+    const name =
+      document.createElement(
+        "a-text"
+      );
+
+    name.classList.add(
+      "m4-player-name"
+    );
+
+    name.classList.add(
+      "m7-player-name"
+    );
+
+    name.setAttribute(
+      "value",
+      data.username ||
+        "Monkey"
+    );
+
+    name.setAttribute(
+      "align",
+      "center"
+    );
+
+    name.setAttribute(
+      "position",
+      "0 .9 0"
+    );
+
+    name.setAttribute(
+      "scale",
+      ".7 .7 .7"
+    );
+
+    name.setAttribute(
+      "look-at",
+      "[camera]"
+    );
+
+    root.appendChild(
+      body
+    );
+
+    root.appendChild(
+      name
+    );
+
+    root.setAttribute(
+      "position",
+      `${data.position.x} ${data.position.y} ${data.position.z}`
+    );
+
+    s.appendChild(
+      root
+    );
+
+    const player = {
+      id:
+        data.id,
+
+      username:
+        data.username ||
+        "Monkey",
+
+      platform:
+        data.platform ||
+        "unknown",
+
+      team:
+        data.team ||
+        "none",
+
+      entity:
+        root,
+
+      body,
+
+      name,
+
+      current: {
+        x:
+          data.position.x,
+
+        y:
+          data.position.y,
+
+        z:
+          data.position.z
+      },
+
+      target: {
+        x:
+          data.position.x,
+
+        y:
+          data.position.y,
+
+        z:
+          data.position.z
+      },
+
+      velocity: {
+        x: 0,
+        y: 0,
+        z: 0
+      },
+
+      rotation: {
+        x: 0,
+        y: 0,
+        z: 0
+      },
+
+      lastUpdate:
+        Date.now(),
+
+      score:
+        Number(
+          data.score
+        ) || 0,
+
+      tagger:
+        !!data.tagger,
+
+      ready:
+        !!data.ready,
+
+      ping:
+        0
+    };
+
+    M7.players.set(
+      data.id,
+      player
+    );
+
+    return player;
+  }
+
+  function removeRemotePlayer(
+    id
+  ) {
+    const player =
+      M7.players.get(
+        id
+      );
+
+    if (!player)
+      return;
+
+    if (
+      player.entity &&
+      player.entity.parentNode
+    ) {
+      player.entity
+        .parentNode
+        .removeChild(
+          player.entity
+        );
+    }
+
+    M7.players.delete(
+      id
+    );
+  }
+
+  function clearRemotePlayers() {
+    M7.players
+      .forEach(
+        player => {
+          if (
+            player.entity &&
+            player.entity.parentNode
+          ) {
+            player.entity
+              .parentNode
+              .removeChild(
+                player.entity
+              );
+          }
+        }
+      );
+
+    M7.players.clear();
+  }
+
+  /* ========================================================
+     REMOTE PLAYER UPDATE
+     ======================================================== */
+
+  function updateRemotePlayer(
+    data
+  ) {
+    if (
+      !data ||
+      !data.id
+    ) return;
+
+    if (
+      data.id ===
+      M7.localPlayer.id
+    ) {
+      return;
+    }
+
+    let player =
+      M7.players.get(
+        data.id
+      );
+
+    if (!player) {
+      player =
+        createRemotePlayer(
+          data
+        );
+    }
+
+    if (!player)
+      return;
+
+    const p =
+      data.position ||
+      {};
+
+    player.target.x =
+      Number(
+        p.x
+      ) || 0;
+
+    player.target.y =
+      Number(
+        p.y
+      ) || 0;
+
+    player.target.z =
+      Number(
+        p.z
+      ) || 0;
+
+    if (
+      data.velocity
+    ) {
+      player.velocity =
+        {
+          x:
+            Number(
+              data.velocity.x
+            ) || 0,
+
+          y:
+            Number(
+              data.velocity.y
+            ) || 0,
+
+          z:
+            Number(
+              data.velocity.z
+            ) || 0
+        };
+    }
+
+    if (
+      data.rotation
+    ) {
+      player.rotation =
+        {
+          x:
+            Number(
+              data.rotation.x
+            ) || 0,
+
+          y:
+            Number(
+              data.rotation.y
+            ) || 0,
+
+          z:
+            Number(
+              data.rotation.z
+            ) || 0
+        };
+    }
+
+    player.username =
+      data.username ||
+      player.username;
+
+    player.team =
+      data.team ||
+      player.team;
+
+    player.score =
+      Number(
+        data.score
+      ) || 0;
+
+    player.tagger =
+      !!data.tagger;
+
+    player.ready =
+      !!data.ready;
+
+    player.lastUpdate =
+      Date.now();
+
+    if (player.name) {
+      player.name.setAttribute(
+        "value",
+        player.username +
+        (
+          player.tagger
+            ? " 🔥"
+            : ""
+        )
+      );
+    }
+
+    M7.packets.received++;
+  }
+
+  function updateRemoteVisuals(
+    dt
+  ) {
+    M7.players
+      .forEach(
+        player => {
+
+          if (
+            !player.entity
+          ) return;
+
+          const smooth =
+            M7.settings
+              .smoothPlayers &&
+            M7.interpolation
+              .enabled;
+
+          const amount =
+            smooth
+              ? clamp(
+                  dt * 12,
+                  0,
+                  1
+                )
+              : 1;
+
+          player.current.x =
+            lerp(
+              player.current.x,
+              player.target.x,
+              amount
+            );
+
+          player.current.y =
+            lerp(
+              player.current.y,
+              player.target.y,
+              amount
+            );
+
+          player.current.z =
+            lerp(
+              player.current.z,
+              player.target.z,
+              amount
+            );
+
+          player.entity
+            .object3D
+            .position
+            .set(
+              player.current.x,
+              player.current.y,
+              player.current.z
+            );
+
+          player.entity
+            .object3D
+            .rotation
+            .set(
+              player.rotation.x,
+              player.rotation.y,
+              player.rotation.z
+            );
+
+          if (
+            player.name
+          ) {
+            player.name
+              .setAttribute(
+                "visible",
+                M7.settings
+                  .showNames
+              );
+          }
+        }
+      );
+  }
+
+  /* ========================================================
+     LOCAL STATE
+     ======================================================== */
+
+  function getLocalState() {
+    const r =
+      rig();
+
+    let position = {
+      x: 0,
+      y: 1,
+      z: 0
+    };
+
+    let rotation = {
+      x: 0,
+      y: 0,
+      z: 0
+    };
+
+    if (r) {
+      const p =
+        r.object3D.position;
+
+      position = {
+        x: p.x,
+        y: p.y,
+        z: p.z
+      };
+
+      if (
+        r.object3D.rotation
+      ) {
+        rotation = {
+          x:
+            r.object3D.rotation.x,
+
+          y:
+            r.object3D.rotation.y,
+
+          z:
+            r.object3D.rotation.z
+        };
+      }
+    }
+
+    let velocity = {
+      x: 0,
+      y: 0,
+      z: 0
+    };
+
+    if (
+      typeof MonkeyVRAdvanced !==
+      "undefined" &&
+      MonkeyVRAdvanced.state &&
+      MonkeyVRAdvanced.state.player &&
+      MonkeyVRAdvanced.state.player.velocity
+    ) {
+      velocity =
+        {
+          ...MonkeyVRAdvanced
+            .state
+            .player
+            .velocity
+        };
+    }
+
+    return {
+      id:
+        M7.localPlayer.id,
+
+      username:
+        M7.localPlayer.username,
+
+      platform:
+        M7.localPlayer.platform,
+
+      team:
+        M7.localPlayer.team,
+
+      position,
+
+      rotation,
+
+      velocity,
+
+      tagger:
+        M7.localPlayer.tagger,
+
+      frozen:
+        M7.localPlayer.frozen,
+
+      spectator:
+        M7.localPlayer.spectator,
+
+      ready:
+        M7.localPlayer.ready,
+
+      score:
+        M7.localPlayer.score,
+
+      room:
+        M7.room.code
+    };
+  }
+
+  function sendLocalState() {
+    if (
+      !M7.room.code
+    ) return;
+
+    const state =
+      getLocalState();
+
+    M7.localPlayer.position =
+      state.position;
+
+    M7.localPlayer.rotation =
+      state.rotation;
+
+    M7.localPlayer.velocity =
+      state.velocity;
+
+    sendPacket(
+      "player_state",
+      state
+    );
+  }
+
+  /* ========================================================
+     PACKET HANDLER
+     ======================================================== */
+
+  function handlePacket(
+    packetData
+  ) {
+    if (
+      !packetData ||
+      typeof packetData !==
+      "object"
+    ) {
+      return;
+    }
+
+    const type =
+      packetData.type;
+
+    const data =
+      packetData.data ||
+      {};
+
+    switch (
+      type
+    ) {
+
+      case "player_join":
+        createRemotePlayer(
+          data
+        );
+
+        notify7(
+          "👋 " +
+          (
+            data.username ||
+            "Monkey"
+          ) +
+          " joined."
+        );
+
+        break;
+
+      case "player_leave":
+        removeRemotePlayer(
+          data.id
+        );
+
+        notify7(
+          "👋 Player left."
+        );
+
+        break;
+
+      case "player_state":
+        updateRemotePlayer(
+          data
+        );
+
+        break;
+
+      case "room_state":
+        applyRoomState(
+          data
+        );
+
+        break;
+
+      case "round_start":
+        startRound(
+          data
+        );
+
+        break;
+
+      case "round_end":
+        endRound(
+          data
+        );
+
+        break;
+
+      case "vote_start":
+        startVote(
+          data
+        );
+
+        break;
+
+      case "vote_update":
+        applyVoteUpdate(
+          data
+        );
+
+        break;
+
+      case "team_update":
+        applyTeamUpdate(
+          data
+        );
+
+        break;
+
+      case "tag_update":
+        applyTagUpdate(
+          data
+        );
+
+        break;
+
+      case "spectator":
+        applySpectator(
+          data
+        );
+
+        break;
+
+      case "server_ping":
+        handlePing(
+          packetData
+        );
+
+        break;
+
+      case "room_kick":
+        leaveRoom();
+
+        notify7(
+          "🚪 You were removed from the room."
+        );
+
+        break;
+
+      case "room_ban":
+        leaveRoom();
+
+        notify7(
+          "🚫 You cannot join this room."
+        );
+
+        break;
+
+      case "announcement":
+        notify7(
+          "📢 " +
+          (
+            data.message ||
+            ""
+          ),
+          5000
+        );
+
+        break;
+    }
+  }
+
+  function applyRoomState(
+    data
+  ) {
+    Object.keys(
+      data || {}
+    ).forEach(
+      key => {
+
+        if (
+          Object.prototype
+            .hasOwnProperty.call(
+              M7.room,
+              key
+            )
+        ) {
+          M7.room[key] =
+            data[key];
+        }
+
+      }
+    );
+
+    if (
+      Array.isArray(
+        data.players
+      )
+    ) {
+      data.players
+        .forEach(
+          player => {
+            createRemotePlayer(
+              player
+            );
+          }
+        );
+    }
+
+    notify7(
+      "🏠 Room synced."
+    );
+  }
+
+  /* ========================================================
+     TAG SYSTEM
+     ======================================================== */
+
+  function applyTagUpdate(
+    data
+  ) {
+    M7.localPlayer.tagger =
+      data.taggerId ===
+      M7.localPlayer.id;
+
+    M7.players
+      .forEach(
+        player => {
+          player.tagger =
+            player.id ===
+            data.taggerId;
+        }
+      );
+
+    if (
+      M7.localPlayer.tagger
+    ) {
+      notify7(
+        "🔥 YOU ARE IT!"
+      );
+    }
+  }
+
+  function tagPlayer(
+    targetId
+  ) {
+    if (
+      !targetId ||
+      !M7.room.code
+    ) return;
+
+    sendPacket(
+      "tag_player",
+      {
+        targetId
+      }
+    );
+  }
+
+  /* ========================================================
+     TEAM SYSTEM
+     ======================================================== */
+
+  function applyTeamUpdate(
+    data
+  ) {
+    M7.teams = {
+      red:
+        data.red || [],
+
+      blue:
+        data.blue || [],
+
+      green:
+        data.green || [],
+
+      yellow:
+        data.yellow || []
+    };
+
+    if (
+      data.assignments &&
+      data.assignments[
+        M7.localPlayer.id
+      ]
+    ) {
+      M7.localPlayer.team =
+        data.assignments[
+          M7.localPlayer.id
+        ];
+    }
+
+    M7.players
+      .forEach(
+        player => {
+          if (
+            data.assignments &&
+            data.assignments[
+              player.id
+            ]
+          ) {
+            player.team =
+              data.assignments[
+                player.id
+              ];
+          }
+        }
+      );
+  }
+
+  function requestTeam(
+    team
+  ) {
+    const allowed = [
+      "red",
+      "blue",
+      "green",
+      "yellow"
+    ];
+
+    if (
+      !allowed.includes(
+        team
+      )
+    ) {
+      return;
+    }
+
+    sendPacket(
+      "team_request",
+      {
+        team
+      }
+    );
+  }
+
+  /* ========================================================
+     READY SYSTEM
+     ======================================================== */
+
+  function setReady(
+    ready
+  ) {
+    M7.localPlayer.ready =
+      !!ready;
+
+    sendPacket(
+      "player_ready",
+      {
+        ready:
+          M7.localPlayer.ready
+      }
+    );
+
+    notify7(
+      M7.localPlayer.ready
+        ? "✅ Ready!"
+        : "❌ Not ready."
+    );
+  }
+
+  /* ========================================================
+     ROUND SYSTEM
+     ======================================================== */
+
+  function startRound(
+    data = {}
+  ) {
+    M7.room.started =
+      true;
+
+    M7.room.state =
+      "playing";
+
+    M7.room.round =
+      Number(
+        data.round
+      ) ||
+      M7.room.round;
+
+    M7.room.roundTime =
+      Number(
+        data.duration
+      ) ||
+      180;
+
+    M7.localPlayer.roundScore =
+      0;
+
+    notify7(
+      "🎮 ROUND " +
+      M7.room.round +
+      " START!",
+      3000
+    );
+  }
+
+  function endRound(
+    data = {}
+  ) {
+    M7.room.started =
+      false;
+
+    M7.room.state =
+      "round_end";
+
+    if (
+      data.scores
+    ) {
+      Object.keys(
+        data.scores
+      ).forEach(
+        id => {
+
+          if (
+            id ===
+            M7.localPlayer.id
+          ) {
+            M7.localPlayer
+              .score =
+              Number(
+                data.scores[id]
+              ) || 0;
+          }
+
+          const player =
+            M7.players.get(
+              id
+            );
+
+          if (player) {
+            player.score =
+              Number(
+                data.scores[id]
+              ) || 0;
+          }
+
+        }
+      );
+    }
+
+    notify7(
+      "🏁 ROUND COMPLETE!",
+      3000
+    );
+  }
+
+  /* ========================================================
+     MAP / MODE VOTING
+     ======================================================== */
+
+  function startVote(
+    data = {}
+  ) {
+    M7.voting.active =
+      true;
+
+    M7.voting.choices =
+      Array.isArray(
+        data.choices
+      )
+        ? data.choices
+        : [];
+
+    M7.voting.votes =
+      {};
+
+    M7.voting.endsAt =
+      Date.now() +
+      (
+        Number(
+          data.duration
+        ) || 15
+      ) *
+      1000;
+
+    notify7(
+      "🗳️ Vote started!"
+    );
+  }
+
+  function vote(
+    choice
+  ) {
+    if (
+      !M7.voting.active
+    ) return;
+
+    if (
+      !M7.voting.choices
+        .includes(
+          choice
+        )
+    ) {
+      return;
+    }
+
+    M7.voting.votes[
+      M7.localPlayer.id
+    ] =
+      choice;
+
+    sendPacket(
+      "vote",
+      {
+        choice
+      }
+    );
+
+    notify7(
+      "🗳️ Voted for " +
+      choice
+    );
+  }
+
+  function applyVoteUpdate(
+    data
+  ) {
+    M7.voting.votes =
+      data.votes ||
+      {};
+
+    if (
+      data.finished
+    ) {
+      M7.voting.active =
+        false;
+
+      if (
+        data.winner
+      ) {
+        notify7(
+          "🏆 Vote winner: " +
+          data.winner
+        );
+      }
+    }
+  }
+
+  /* ========================================================
+     SPECTATOR MODE
+     ======================================================== */
+
+  function enterSpectator() {
+    M7.spectator.active =
+      true;
+
+    M7.localPlayer.spectator =
+      true;
+
+    M7.localPlayer.frozen =
+      true;
+
+    chooseSpectatorTarget();
+
+    notify7(
+      "👁️ Spectator mode"
+    );
+  }
+
+  function exitSpectator() {
+    M7.spectator.active =
+      false;
+
+    M7.localPlayer.spectator =
+      false;
+
+    M7.localPlayer.frozen =
+      false;
+
+    M7.spectator.targetId =
+      null;
+
+    notify7(
+      "🐒 Back to player mode."
+    );
+  }
+
+  function chooseSpectatorTarget() {
+    const players =
+      Array.from(
+        M7.players.values()
+      );
+
+    if (
+      !players.length
+    ) {
+      M7.spectator.targetId =
+        null;
+
+      return;
+    }
+
+    M7.spectator.index =
+      clamp(
+        M7.spectator.index,
+        0,
+        players.length - 1
+      );
+
+    M7.spectator.targetId =
+      players[
+        M7.spectator.index
+      ].id;
+  }
+
+  function nextSpectator() {
+    const players =
+      Array.from(
+        M7.players.values()
+      );
+
+    if (
+      !players.length
+    ) return;
+
+    M7.spectator.index =
+      (
+        M7.spectator.index +
+        1
+      ) %
+      players.length;
+
+    chooseSpectatorTarget();
+  }
+
+  function updateSpectator() {
+    if (
+      !M7.spectator.active
+    ) return;
+
+    const target =
+      M7.players.get(
+        M7.spectator.targetId
+      );
+
+    const cam =
+      camera();
+
+    if (
+      !target ||
+      !cam
+    ) return;
+
+    const p =
+      target.current;
+
+    cam.object3D.position
+      .set(
+        p.x,
+        p.y + 2,
+        p.z + 4
+      );
+
+    cam.object3D
+      .lookAt(
+        p.x,
+        p.y,
+        p.z
+      );
+  }
+
+  /* ========================================================
+     PING
+     ======================================================== */
+
+  function pingServer() {
+    const timestamp =
+      Date.now();
+
+    sendPacket(
+      "ping",
+      {
+        timestamp
+      }
+    );
+  }
+
+  function handlePing(
+    packetData
+  ) {
+    const sent =
+      Number(
+        packetData.data &&
+        packetData.data
+          .timestamp
+      );
+
+    if (
+      sent
+    ) {
+      M7.connection.ping =
+        Math.max(
+          0,
+          Date.now() -
+          sent
+        );
+    }
+  }
+
+  /* ========================================================
+     RECONNECT
+     ======================================================== */
+
+  function scheduleReconnect() {
+    if (
+      !M7.reconnect.enabled
+    ) return;
+
+    if (
+      M7.connection.attempts >=
+      M7.connection.maxAttempts
+    ) {
+      notify7(
+        "❌ Reconnect attempts ended."
+      );
+
+      return;
+    }
+
+    M7.connection.reconnecting =
+      true;
+
+    const delay =
+      Math.min(
+        15000,
+        1000 *
+        Math.pow(
+          2,
+          M7.connection.attempts
+        )
+      );
+
+    M7.reconnect.nextAttempt =
+      Date.now() +
+      delay;
+
+    M7.connection.attempts++;
+
+    notify7(
+      "🔄 Reconnecting in " +
+      Math.ceil(
+        delay / 1000
+      ) +
+      "s..."
+    );
+  }
+
+  function attemptReconnect() {
+    if (
+      !M7.connection.reconnecting
+    ) return;
+
+    if (
+      Date.now() <
+      M7.reconnect.nextAttempt
+    ) {
+      return;
+    }
+
+    M7.connection.reconnecting =
+      false;
+
+    if (
+      M7.room.code
+    ) {
+      joinRoom(
+        M7.room.code
+      );
+    }
+  }
+
+  /* ========================================================
+     SCOREBOARD
+     ======================================================== */
+
+  function getScoreboard() {
+    const list =
+      Array.from(
+        M7.players.values()
+      )
+      .map(
+        player => ({
+          id:
+            player.id,
+
+          username:
+            player.username,
+
+          score:
+            player.score,
+
+          team:
+            player.team,
+
+          tagger:
+            player.tagger
+        })
+      );
+
+    list.push({
+      id:
+        M7.localPlayer.id,
+
+      username:
+        M7.localPlayer.username,
+
+      score:
+        M7.localPlayer.score,
+
+      team:
+        M7.localPlayer.team,
+
+      tagger:
+        M7.localPlayer.tagger
+    });
+
+    return list.sort(
+      (
+        a,
+        b
+      ) =>
+        b.score -
+        a.score
+    );
+  }
+
+  /* ========================================================
+     MULTIPLAYER HUD
+     ======================================================== */
+
+  function createHUD() {
+    if (
+      document.getElementById(
+        "m7-hud"
+      )
+    ) return;
+
+    const hud =
+      document.createElement(
+        "div"
+      );
+
+    hud.id =
+      "m7-hud";
+
+    Object.assign(
+      hud.style,
+      {
+        position:
+          "fixed",
+
+        top:
+          "12px",
+
+        right:
+          "12px",
+
+        zIndex:
+          "9970",
+
+        color:
+          "white",
+
+        background:
+          "rgba(0,0,0,.45)",
+
+        padding:
+          "10px 12px",
+
+        borderRadius:
+          "12px",
+
+        fontFamily:
+          "Arial,sans-serif",
+
+        fontSize:
+          "12px",
+
+        fontWeight:
+          "800",
+
+        pointerEvents:
+          "none",
+
+        minWidth:
+          "160px"
+      }
+    );
+
+    hud.innerHTML = `
+      <div id="m7-room">
+        🏠 Offline
+      </div>
+
+      <div id="m7-players">
+        👥 1
+      </div>
+
+      <div id="m7-ping">
+        📶 --
+      </div>
+
+      <div id="m7-mode">
+        🎮 Casual
+      </div>
+
+      <div id="m7-round">
+        🏁 Lobby
+      </div>
+    `;
+
+    document.body.appendChild(
+      hud
+    );
+  }
+
+  function updateHUD() {
+    const room =
+      document.getElementById(
+        "m7-room"
+      );
+
+    const players =
+      document.getElementById(
+        "m7-players"
+      );
+
+    const ping =
+      document.getElementById(
+        "m7-ping"
+      );
+
+    const mode =
+      document.getElementById(
+        "m7-mode"
+      );
+
+    const round =
+      document.getElementById(
+        "m7-round"
+      );
+
+    if (room) {
+      room.textContent =
+        M7.room.code
+          ? "🏠 " +
+            M7.room.code
+          : "🏠 Offline";
+    }
+
+    if (players) {
+      players.textContent =
+        "👥 " +
+        (
+          M7.players.size +
+          1
+        );
+    }
+
+    if (ping) {
+      ping.textContent =
+        "📶 " +
+        (
+          M7.connection.ping
+            ? M7.connection.ping +
+              "ms"
+            : "--"
+        );
+    }
+
+    if (mode) {
+      mode.textContent =
+        "🎮 " +
+        M7.room.mode;
+    }
+
+    if (round) {
+      round.textContent =
+        M7.room.started
+          ? "🏁 Round " +
+            M7.room.round
+          : "🏁 Lobby";
+    }
+  }
+
+  /* ========================================================
+     SCOREBOARD UI
+     ======================================================== */
+
+  function openScoreboard() {
+    const old =
+      document.getElementById(
+        "m7-scoreboard"
+      );
+
+    if (old) {
+      old.remove();
+      return;
+    }
+
+    const board =
+      document.createElement(
+        "div"
+      );
+
+    board.id =
+      "m7-scoreboard";
+
+    Object.assign(
+      board.style,
+      {
+        position:
+          "fixed",
+
+        left:
+          "50%",
+
+        top:
+          "50%",
+
+        transform:
+          "translate(-50%,-50%)",
+
+        width:
+          "min(500px,90%)",
+
+        maxHeight:
+          "70%",
+
+        overflow:
+          "auto",
+
+        zIndex:
+          "9995",
+
+        background:
+          "rgba(15,15,20,.97)",
+
+        color:
+          "white",
+
+        borderRadius:
+          "18px",
+
+        padding:
+          "16px",
+
+        fontFamily:
+          "Arial,sans-serif",
+
+        border:
+          "1px solid rgba(255,255,255,.15)"
+      }
+    );
+
+    const scores =
+      getScoreboard();
+
+    board.innerHTML = `
+      <h2>
+        🏆 Scoreboard
+      </h2>
+
+      ${
+        scores.length
+          ? scores.map(
+              (
+                player,
+                index
+              ) => `
+                <div
+                  style="
+                    display:flex;
+                    justify-content:space-between;
+                    gap:10px;
+                    padding:10px;
+                    border-radius:10px;
+                    background:
+                      ${
+                        index === 0
+                          ? "rgba(255,255,255,.12)"
+                          : "rgba(255,255,255,.05)"
+                      };
+                    margin-bottom:5px;
+                  "
+                >
+                  <span>
+                    ${
+                      index + 1
+                    }.
+                    ${
+                      escapeHTML(
+                        player.username
+                      )
+                    }
+
+                    ${
+                      player.tagger
+                        ? " 🔥"
+                        : ""
+                    }
+                  </span>
+
+                  <span>
+                    ${
+                      player.score
+                    }
+                  </span>
+                </div>
+              `
+            ).join("")
+          : "<p>No players.</p>"
+      }
+
+      <button
+        id="m7-close-board"
+        style="
+          width:100%;
+          min-height:44px;
+          margin-top:10px;
+          border-radius:10px;
+        "
+      >
+        Close
+      </button>
+    `;
+
+    document.body.appendChild(
+      board
+    );
+
+    document
+      .getElementById(
+        "m7-close-board"
+      )
+      .onclick =
+      () =>
+        board.remove();
+  }
+
+  function escapeHTML(
+    value
+  ) {
+    return String(
+      value ?? ""
+    )
+      .replace(
+        /&/g,
+        "&amp;"
+      )
+      .replace(
+        /</g,
+        "&lt;"
+      )
+      .replace(
+        />/g,
+        "&gt;"
+      )
+      .replace(
+        /"/g,
+        "&quot;"
+      )
+      .replace(
+        /'/g,
+        "&#039;"
+      );
+  }
+
+  /* ========================================================
+     ROOM CONTROL UI
+     ======================================================== */
+
+  function openRoomPanel() {
+    const existing =
+      document.getElementById(
+        "m7-room-panel"
+      );
+
+    if (existing) {
+      existing.remove();
+      return;
+    }
+
+    const panel =
+      document.createElement(
+        "div"
+      );
+
+    panel.id =
+      "m7-room-panel";
+
+    Object.assign(
+      panel.style,
+      {
+        position:
+          "fixed",
+
+        left:
+          "50%",
+
+        top:
+          "50%",
+
+        transform:
+          "translate(-50%,-50%)",
+
+        width:
+          "min(430px,90%)",
+
+        zIndex:
+          "9996",
+
+        background:
+          "rgba(15,15,20,.97)",
+
+        color:
+          "white",
+
+        padding:
+          "16px",
+
+        borderRadius:
+          "18px",
+
+        fontFamily:
+          "Arial,sans-serif"
+      }
+    );
+
+    panel.innerHTML = `
+      <h2>
+        🌐 Multiplayer
+      </h2>
+
+      <input
+        id="m7-room-code"
+        placeholder="Room code"
+        maxlength="8"
+        style="
+          width:100%;
+          min-height:44px;
+          box-sizing:border-box;
+          margin-bottom:8px;
+        "
+      >
+
+      <button
+        id="m7-create"
+        style="
+          width:100%;
+          min-height:44px;
+          margin-bottom:6px;
+        "
+      >
+        🏠 Create Room
+      </button>
+
+      <button
+        id="m7-join"
+        style="
+          width:100%;
+          min-height:44px;
+          margin-bottom:6px;
+        "
+      >
+        🔗 Join Room
+      </button>
+
+      <button
+        id="m7-ready"
+        style="
+          width:100%;
+          min-height:44px;
+          margin-bottom:6px;
+        "
+      >
+        ✅ Ready
+      </button>
+
+      <button
+        id="m7-score"
+        style="
+          width:100%;
+          min-height:44px;
+          margin-bottom:6px;
+        "
+      >
+        🏆 Scoreboard
+      </button>
+
+      <button
+        id="m7-spectate"
+        style="
+          width:100%;
+          min-height:44px;
+          margin-bottom:6px;
+        "
+      >
+        👁️ Spectate
+      </button>
+
+      <button
+        id="m7-leave"
+        style="
+          width:100%;
+          min-height:44px;
+          margin-bottom:6px;
+        "
+      >
+        🚪 Leave Room
+      </button>
+
+      <button
+        id="m7-close"
+        style="
+          width:100%;
+          min-height:44px;
+        "
+      >
+        ✖ Close
+      </button>
+    `;
+
+    document.body.appendChild(
+      panel
+    );
+
+    document
+      .getElementById(
+        "m7-create"
+      )
+      .onclick =
+      () => {
+        createRoom();
+
+        panel.remove();
+      };
+
+    document
+      .getElementById(
+        "m7-join"
+      )
+      .onclick =
+      () => {
+        const code =
+          document
+            .getElementById(
+              "m7-room-code"
+            )
+            .value;
+
+        joinRoom(
+          code
+        );
+      };
+
+    document
+      .getElementById(
+        "m7-ready"
+      )
+      .onclick =
+      () =>
+        setReady(
+          !M7.localPlayer
+            .ready
+        );
+
+    document
+      .getElementById(
+        "m7-score"
+      )
+      .onclick =
+      openScoreboard;
+
+    document
+      .getElementById(
+        "m7-spectate"
+      )
+      .onclick =
+      () => {
+        if (
+          M7.spectator.active
+        ) {
+          exitSpectator();
+        } else {
+          enterSpectator();
+        }
+      };
+
+    document
+      .getElementById(
+        "m7-leave"
+      )
+      .onclick =
+      leaveRoom;
+
+    document
+      .getElementById(
+        "m7-close"
+      )
+      .onclick =
+      () =>
+        panel.remove();
+  }
+
+  /* ========================================================
+     KEYBOARD CONTROLS
+     ======================================================== */
+
+  function setupKeys() {
+    window.addEventListener(
+      "keydown",
+      event => {
+
+        if (
+          event.repeat
+        ) return;
+
+        const key =
+          event.key.toLowerCase();
+
+        if (
+          key ===
+          "l"
+        ) {
+          openRoomPanel();
+        }
+
+        if (
+          key ===
+          "tab"
+        ) {
+          event.preventDefault();
+
+          openScoreboard();
+        }
+
+        if (
+          key ===
+          "p"
+        ) {
+          if (
+            M7.spectator.active
+          ) {
+            nextSpectator();
+          }
+        }
+
+        if (
+          key ===
+          "y"
+        ) {
+          setReady(
+            !M7.localPlayer
+              .ready
+          );
+        }
+      }
+    );
+  }
+
+  /* ========================================================
+     CONNECTION HOOK
+     ======================================================== */
+
+  function setupConnectionHooks() {
+
+    /*
+     * If Part 4 exposes its packet receiver,
+     * wrap it without destroying the original.
+     */
+
+    if (
+      typeof window
+        .MonkeyVROnline ===
+      "object"
+    ) {
+
+      const online =
+        window
+          .MonkeyVROnline;
+
+      if (
+        typeof online
+          .handlePacket ===
+        "function"
+      ) {
+
+        const original =
+          online.handlePacket;
+
+        if (
+          !online
+            ._m7Wrapped
+        ) {
+
+          online.handlePacket =
+            function (
+              data
+            ) {
+
+              try {
+                original(
+                  data
+                );
+              } catch (
+                err
+              ) {}
+
+              try {
+                handlePacket(
+                  data
+                );
+              } catch (
+                err
+              ) {}
+
+            };
+
+          online._m7Wrapped =
+            true;
+        }
+      }
+
+      M7.connection.connected =
+        !!online.connected;
+    }
+  }
+
+  /* ========================================================
+     HEARTBEAT
+     ======================================================== */
+
+  function heartbeat() {
+    const timestamp =
+      Date.now();
+
+    M7.connection
+      .lastHeartbeat =
+      timestamp;
+
+    sendPacket(
+      "heartbeat",
+      {
+        timestamp
+      }
+    );
+  }
+
+  /* ========================================================
+     MAIN LOOP
+     ======================================================== */
+
+  let lastLoop =
+    performance.now();
+
+  let stateTimer =
+    0;
+
+  let pingTimer =
+    0;
+
+  function loop(
+    timestamp
+  ) {
+    const dt =
+      Math.min(
+        .05,
+        (
+          timestamp -
+          lastLoop
+        ) /
+        1000
+      );
+
+    lastLoop =
+      timestamp;
+
+    updateRemoteVisuals(
+      dt
+    );
+
+    updateSpectator();
+
+    updateHUD();
+
+    stateTimer +=
+      dt;
+
+    pingTimer +=
+      dt;
+
+    if (
+      stateTimer >=
+      0.05
+    ) {
+      sendLocalState();
+
+      stateTimer =
+        0;
+    }
+
+    if (
+      pingTimer >=
+      2
+    ) {
+      pingServer();
+
+      pingTimer =
+        0;
+    }
+
+    attemptReconnect();
+
+    requestAnimationFrame(
+      loop
+    );
+  }
+
+  /* ========================================================
+     TEST / LOCAL SIMULATION
+     ======================================================== */
+
+  function spawnLocalTestPlayer() {
+    const id =
+      makeId(
+        "test"
+      );
+
+    createRemotePlayer({
+      id,
+
+      username:
+        "TestMonkey",
+
+      platform:
+        "browser",
+
+      team:
+        "red",
+
+      position: {
+        x:
+          Math.random() *
+            10 -
+          5,
+
+        y:
+          1,
+
+        z:
+          Math.random() *
+            10 -
+          5
+      },
+
+      score:
+        Math.floor(
+          Math.random() *
+          100
+        )
+    });
+
+    notify7(
+      "🧪 Local test player added."
+    );
+  }
+
+  function clearTestPlayers() {
+    const ids =
+      Array.from(
+        M7.players.keys()
+      );
+
+    ids.forEach(
+      id => {
+        if (
+          id.startsWith(
+            "test_"
+          )
+        ) {
+          removeRemotePlayer(
+            id
+          );
+        }
+      }
+    );
+  }
+
+  /* ========================================================
+     PUBLIC API
+     ======================================================== */
+
+  window.MonkeyVRMultiplayer = {
+
+    state:
+      M7,
+
+    createRoom,
+    joinRoom,
+    leaveRoom,
+
+    sendPacket,
+    handlePacket,
+
+    setReady,
+
+    requestTeam,
+
+    tagPlayer,
+
+    startRound,
+    endRound,
+
+    vote,
+    startVote,
+
+    enterSpectator,
+    exitSpectator,
+    nextSpectator,
+
+    openRoomPanel,
+    openScoreboard,
+
+    getScoreboard,
+
+    spawnLocalTestPlayer,
+    clearTestPlayers,
+
+    reconnect:
+      scheduleReconnect
+  };
+
+  /* ========================================================
+     INITIALIZATION
+     ======================================================== */
+
+  function initPart7() {
+    if (
+      M7.initialized
+    ) return;
+
+    M7.initialized =
+      true;
+
+    loadPlayerIdentity();
+
+    createHUD();
+
+    setupKeys();
+
+    setupConnectionHooks();
+
+    /*
+     * Give Part 4's online layer a moment
+     * to finish initializing.
+     */
+    setTimeout(
+      setupConnectionHooks,
+      1000
+    );
+
+    /*
+     * Local test players are NOT spawned
+     * automatically because they could be
+     * mistaken for real online players.
+     */
+
+    setInterval(
+      heartbeat,
+      5000
+    );
+
+    setInterval(
+      () => {
+        if (
+          M7.room.code &&
+          !M7.connection.connected
+        ) {
+          scheduleReconnect();
+        }
+      },
+      5000
+    );
+
+    notify7(
+      "🌐 Part 7 Multiplayer Client loaded!",
+      3000
+    );
+
+    requestAnimationFrame(
+      loop
+    );
+  }
+
+  if (
+    document.readyState ===
+    "loading"
+  ) {
+    document.addEventListener(
+      "DOMContentLoaded",
+      initPart7
+    );
+  } else {
+    initPart7();
+  }
+
+})();  
+  /* =========================================================
+   MONKEY VR — PART 8
+   CREATOR / BUILD 2.0
+   ========================================================= */
+
+(function () {
+  "use strict";
+
+  const M8 = {
+    version: "8.0",
+    builderOpen: false,
+    testMode: false,
+    selected: null,
+    clipboard: null,
+    grid: 0.5,
+    snap: true,
+    rotationSnap: 15,
+    currentTool: "select",
+    currentType: "box",
+    objects: [],
+    history: [],
+    future: [],
+    saveSlots: {},
+    mapData: {
+      name: "Untitled Map",
+      description: "",
+      tags: [],
+      author: "Player",
+      version: 1,
+      published: false,
+      featured: false,
+      plays: 0,
+      favorites: 0,
+      reports: 0
+    },
+    logic: [],
+    prefabs: [],
+    collaborators: [],
+    permissions: {
+      build: true,
+      edit: true,
+      publish: false
+    }
+  };
+
+  /* -------------------------
+     BASIC HELPERS
+  ------------------------- */
+
+  const scene8 = () => document.querySelector("a-scene");
+  const rig8 = () => document.querySelector("#rig") || document.querySelector("#playerRig");
+  const cam8 = () => document.querySelector("[camera]");
+
+  function uid8(prefix) {
+    return prefix + "_" + Math.random().toString(36).slice(2, 9);
+  }
+
+  function clamp8(v, min, max) {
+    return Math.max(min, Math.min(max, v));
+  }
+
+  function snap8(v, grid) {
+    if (!M8.snap) return v;
+    return Math.round(v / grid) * grid;
+  }
+
+  function vec8(v) {
+    return {
+      x: Number(v.x) || 0,
+      y: Number(v.y) || 0,
+      z: Number(v.z) || 0
+    };
+  }
+
+  function rot8(v) {
+    return {
+      x: Number(v.x) || 0,
+      y: Number(v.y) || 0,
+      z: Number(v.z) || 0
+    };
+  }
+
+  function scale8(v) {
+    return {
+      x: Number(v.x) || 1,
+      y: Number(v.y) || 1,
+      z: Number(v.z) || 1
+    };
+  }
+
+  function notify8(message) {
+    if (typeof window.showToast === "function") {
+      window.showToast(message);
+      return;
+    }
+
+    let el = document.querySelector("#m8-toast");
+
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "m8-toast";
+
+      Object.assign(el.style, {
+        position: "fixed",
+        left: "50%",
+        bottom: "30px",
+        transform: "translateX(-50%)",
+        background: "rgba(0,0,0,.82)",
+        color: "white",
+        padding: "12px 18px",
+        borderRadius: "12px",
+        zIndex: "99999",
+        fontFamily: "Arial",
+        fontSize: "14px",
+        pointerEvents: "none",
+        opacity: "0",
+        transition: "opacity .2s"
+      });
+
+      document.body.appendChild(el);
+    }
+
+    el.textContent = message;
+    el.style.opacity = "1";
+
+    clearTimeout(el._timer);
+
+    el._timer = setTimeout(() => {
+      el.style.opacity = "0";
+    }, 1600);
+  }
+
+  /* -------------------------
+     BUILDER ROOT
+  ------------------------- */
+
+  function ensureBuilderRoot() {
+    const scene = scene8();
+    if (!scene) return null;
+
+    let root = document.querySelector("#creator-build-root");
+
+    if (!root) {
+      root = document.createElement("a-entity");
+      root.id = "creator-build-root";
+      scene.appendChild(root);
+    }
+
+    return root;
+  }
+
+  /* -------------------------
+     OBJECT TYPES
+  ------------------------- */
+
+  const TYPES8 = {
+    box: {
+      label: "BOX",
+      geometry: "primitive: box; width: 1; height: 1; depth: 1"
+    },
+
+    wall: {
+      label: "WALL",
+      geometry: "primitive: box; width: 3; height: 2; depth: .35"
+    },
+
+    ramp: {
+      label: "RAMP",
+      geometry: "primitive: box; width: 2; height: .35; depth: 3"
+    },
+
+    ball: {
+      label: "BALL",
+      geometry: "primitive: sphere; radius: .5"
+    },
+
+    target: {
+      label: "TARGET",
+      geometry: "primitive: cylinder; radius: .6; height: .15"
+    },
+
+    platform: {
+      label: "PLATFORM",
+      geometry: "primitive: box; width: 3; height: .25; depth: 3"
+    },
+
+    jump: {
+      label: "JUMP PAD",
+      geometry: "primitive: cylinder; radius: .8; height: .2"
+    },
+
+    checkpoint: {
+      label: "CHECKPOINT",
+      geometry: "primitive: box; width: 1; height: 2; depth: .2"
+    },
+
+    door: {
+      label: "DOOR",
+      geometry: "primitive: box; width: 2; height: 3; depth: .3"
+    },
+
+    button: {
+      label: "BUTTON",
+      geometry: "primitive: cylinder; radius: .35; height: .15"
+    },
+
+    trigger: {
+      label: "TRIGGER",
+      geometry: "primitive: box; width: 2; height: 2; depth: 2"
+    },
+
+    portal: {
+      label: "PORTAL",
+      geometry: "primitive: torus; radius: 1; radius-tubular: .12"
+    },
+
+    moving: {
+      label: "MOVING PLATFORM",
+      geometry: "primitive: box; width: 3; height: .25; depth: 3"
+    },
+
+    spawn: {
+      label: "SPAWN",
+      geometry: "primitive: cylinder; radius: .7; height: .1"
+    },
+
+    lava: {
+      label: "LAVA",
+      geometry: "primitive: box; width: 4; height: .15; depth: 4"
+    },
+
+    tree: {
+      label: "TREE",
+      geometry: "primitive: cylinder; radius: .3; height: 3"
+    },
+
+    sign: {
+      label: "SIGN",
+      geometry: "primitive: plane; width: 2; height: 1"
+    }
+  };
+
+  /* -------------------------
+     HISTORY
+  ------------------------- */
+
+  function snapshot8() {
+    return {
+      objects: JSON.parse(JSON.stringify(M8.objects)),
+      logic: JSON.parse(JSON.stringify(M8.logic)),
+      mapData: JSON.parse(JSON.stringify(M8.mapData))
+    };
+  }
+
+  function pushHistory8() {
+    M8.history.push(snapshot8());
+
+    if (M8.history.length > 50) {
+      M8.history.shift();
+    }
+
+    M8.future.length = 0;
+  }
+
+  function restore8(state) {
+    if (!state) return;
+
+    M8.objects = JSON.parse(JSON.stringify(state.objects || []));
+    M8.logic = JSON.parse(JSON.stringify(state.logic || []));
+    M8.mapData = JSON.parse(
+      JSON.stringify(state.mapData || M8.mapData)
+    );
+
+    renderObjects8();
+    notify8("Restored");
+  }
+
+  function undo8() {
+    if (!M8.history.length) {
+      notify8("Nothing to undo");
+      return;
+    }
+
+    M8.future.push(snapshot8());
+
+    const state = M8.history.pop();
+
+    restore8(state);
+  }
+
+  function redo8() {
+    if (!M8.future.length) {
+      notify8("Nothing to redo");
+      return;
+    }
+
+    M8.history.push(snapshot8());
+
+    const state = M8.future.pop();
+
+    restore8(state);
+  }
+
+  /* -------------------------
+     OBJECT CREATION
+  ------------------------- */
+
+  function objectPosition8() {
+    const rig = rig8();
+
+    if (!rig) {
+      return {
+        x: 0,
+        y: 2,
+        z: -3
+      };
+    }
+
+    const p = rig.object3D.position;
+
+    return {
+      x: snap8(p.x, M8.grid),
+      y: snap8(p.y, M8.grid),
+      z: snap8(p.z - 3, M8.grid)
+    };
+  }
+
+  function createObject8(type, position) {
+    if (!TYPES8[type]) type = "box";
+
+    pushHistory8();
+
+    const object = {
+      id: uid8("obj"),
+      type,
+      name: TYPES8[type].label,
+      position: vec8(position || objectPosition8()),
+      rotation: {
+        x: 0,
+        y: 0,
+        z: 0
+      },
+      scale: {
+        x: 1,
+        y: 1,
+        z: 1
+      },
+      color: "",
+      locked: false,
+      visible: true,
+      physics: false,
+      moving: false,
+      movePath: null,
+      metadata: {
+        created: Date.now()
+      }
+    };
+
+    M8.objects.push(object);
+
+    renderObjects8();
+
+    selectObject8(object.id);
+
+    return object;
+  }
+
+  /* -------------------------
+     OBJECT DOM
+  ------------------------- */
+
+  function makeEntity8(object) {
+    const el = document.createElement("a-entity");
+
+    el.dataset.creatorObject = object.id;
+
+    const def = TYPES8[object.type] || TYPES8.box;
+
+    el.setAttribute("geometry", def.geometry);
+
+    el.setAttribute(
+      "position",
+      `${object.position.x} ${object.position.y} ${object.position.z}`
+    );
+
+    el.setAttribute(
+      "rotation",
+      `${object.rotation.x} ${object.rotation.y} ${object.rotation.z}`
+    );
+
+    el.setAttribute(
+      "scale",
+      `${object.scale.x} ${object.scale.y} ${object.scale.z}`
+    );
+
+    if (object.color) {
+      el.setAttribute("material", `color:${object.color};roughness:.8`);
+    }
+
+    if (object.type === "button") {
+      el.setAttribute("material", "color:#ff5555");
+    }
+
+    if (object.type === "jump") {
+      el.setAttribute("material", "color:#55ddff");
+    }
+
+    if (object.type === "checkpoint") {
+      el.setAttribute("material", "color:#55ff88");
+    }
+
+    if (object.type === "trigger") {
+      el.setAttribute(
+        "material",
+        "color:#aa66ff;opacity:.22;transparent:true"
+      );
+    }
+
+    if (object.type === "portal") {
+      el.setAttribute("material", "color:#55aaff;shader:flat");
+    }
+
+    if (object.type === "lava") {
+      el.setAttribute("material", "color:#ff4422;emissive:#ff2200");
+    }
+
+    if (object.type === "sign") {
+      el.setAttribute(
+        "material",
+        "color:#eeeeee;side:double"
+      );
+    }
+
+    if (object.locked) {
+      el.setAttribute(
+        "material",
+        "color:#777777;opacity:.65"
+      );
+    }
+
+    el.addEventListener("click", function (event) {
+      event.stopPropagation();
+      selectObject8(object.id);
+    });
+
+    el.addEventListener("mouseenter", function () {
+      if (object.locked) return;
+
+      if (!M8.testMode) {
+        el.setAttribute(
+          "material",
+          "color:#ffff66;opacity:.95"
+        );
+      }
+    });
+
+    el.addEventListener("mouseleave", function () {
+      if (!object.color) {
+        el.removeAttribute("material");
+      }
+    });
+
+    return el;
+  }
+
+  function renderObjects8() {
+    const root = ensureBuilderRoot();
+
+    if (!root) return;
+
+    while (root.firstChild) {
+      root.removeChild(root.firstChild);
+    }
+
+    M8.objects.forEach(object => {
+      if (!object.visible) return;
+
+      const el = makeEntity8(object);
+
+      root.appendChild(el);
+    });
+  }
+
+  /* -------------------------
+     SELECT
+  ------------------------- */
+
+  function selectObject8(id) {
+    const object = M8.objects.find(o => o.id === id);
+
+    if (!object) return;
+
+    M8.selected = id;
+
+    document
+      .querySelectorAll("[data-creator-selected]")
+      .forEach(el => {
+        el.removeAttribute("data-creator-selected");
+        el.setAttribute("material", "opacity:1");
+      });
+
+    const el = document.querySelector(
+      `[data-creator-object="${id}"]`
+    );
+
+    if (el) {
+      el.dataset.creatorSelected = "true";
+
+      el.setAttribute(
+        "material",
+        "color:#ffff55;opacity:.9"
+      );
+    }
+
+    updateBuilderUI8();
+
+    window.dispatchEvent(
+      new CustomEvent("monkeyvr:creatorSelect", {
+        detail: object
+      })
+    );
+  }
+
+  function selectedObject8() {
+    return M8.objects.find(
+      o => o.id === M8.selected
+    ) || null;
+  }
+
+  /* -------------------------
+     TRANSFORMS
+  ------------------------- */
+
+  function moveSelected8(x, y, z) {
+    const object = selectedObject8();
+
+    if (!object || object.locked) return;
+
+    pushHistory8();
+
+    object.position.x = snap8(
+      object.position.x + Number(x || 0),
+      M8.grid
+    );
+
+    object.position.y = snap8(
+      object.position.y + Number(y || 0),
+      M8.grid
+    );
+
+    object.position.z = snap8(
+      object.position.z + Number(z || 0),
+      M8.grid
+    );
+
+    renderObjects8();
+    selectObject8(object.id);
+  }
+
+  function rotateSelected8(x, y, z) {
+    const object = selectedObject8();
+
+    if (!object || object.locked) return;
+
+    pushHistory8();
+
+    object.rotation.x += Number(x || 0);
+    object.rotation.y += Number(y || 0);
+    object.rotation.z += Number(z || 0);
+
+    object.rotation.x =
+      Math.round(object.rotation.x / M8.rotationSnap) *
+      M8.rotationSnap;
+
+    object.rotation.y =
+      Math.round(object.rotation.y / M8.rotationSnap) *
+      M8.rotationSnap;
+
+    object.rotation.z =
+      Math.round(object.rotation.z / M8.rotationSnap) *
+      M8.rotationSnap;
+
+    renderObjects8();
+    selectObject8(object.id);
+  }
+
+  function scaleSelected8(x, y, z) {
+    const object = selectedObject8();
+
+    if (!object || object.locked) return;
+
+    pushHistory8();
+
+    object.scale.x = clamp8(
+      object.scale.x * Number(x || 1),
+      .1,
+      20
+    );
+
+    object.scale.y = clamp8(
+      object.scale.y * Number(y || 1),
+      .1,
+      20
+    );
+
+    object.scale.z = clamp8(
+      object.scale.z * Number(z || 1),
+      .1,
+      20
+    );
+
+    renderObjects8();
+    selectObject8(object.id);
+  }
+
+  /* -------------------------
+     DELETE / DUPLICATE
+  ------------------------- */
+
+  function deleteSelected8() {
+    if (!M8.selected) return;
+
+    const index = M8.objects.findIndex(
+      o => o.id === M8.selected
+    );
+
+    if (index < 0) return;
+
+    if (M8.objects[index].locked) {
+      notify8("Object is locked");
+      return;
+    }
+
+    pushHistory8();
+
+    M8.objects.splice(index, 1);
+
+    M8.selected = null;
+
+    renderObjects8();
+
+    updateBuilderUI8();
+  }
+
+  function duplicateSelected8() {
+    const object = selectedObject8();
+
+    if (!object) return;
+
+    pushHistory8();
+
+    const copy = JSON.parse(
+      JSON.stringify(object)
+    );
+
+    copy.id = uid8("obj");
+
+    copy.position.x += M8.grid;
+
+    copy.position.z += M8.grid;
+
+    copy.name += " Copy";
+
+    M8.objects.push(copy);
+
+    renderObjects8();
+
+    selectObject8(copy.id);
+  }
+
+  function copySelected8() {
+    const object = selectedObject8();
+
+    if (!object) return;
+
+    M8.clipboard = JSON.parse(
+      JSON.stringify(object)
+    );
+
+    notify8("Copied");
+  }
+
+  function paste8() {
+    if (!M8.clipboard) {
+      notify8("Clipboard empty");
+      return;
+    }
+
+    pushHistory8();
+
+    const copy = JSON.parse(
+      JSON.stringify(M8.clipboard)
+    );
+
+    copy.id = uid8("obj");
+
+    const p = objectPosition8();
+
+    copy.position = {
+      x: p.x,
+      y: p.y,
+      z: p.z
+    };
+
+    copy.name += " Paste";
+
+    M8.objects.push(copy);
+
+    renderObjects8();
+
+    selectObject8(copy.id);
+  }
+
+  /* -------------------------
+     LOCK / VISIBILITY
+  ------------------------- */
+
+  function toggleLock8() {
+    const object = selectedObject8();
+
+    if (!object) return;
+
+    pushHistory8();
+
+    object.locked = !object.locked;
+
+    renderObjects8();
+
+    selectObject8(object.id);
+
+    notify8(
+      object.locked
+        ? "Object locked"
+        : "Object unlocked"
+    );
+  }
+
+  function toggleVisibility8() {
+    const object = selectedObject8();
+
+    if (!object) return;
+
+    pushHistory8();
+
+    object.visible = !object.visible;
+
+    renderObjects8();
+
+    updateBuilderUI8();
+  }
+
+  /* -------------------------
+     PREFABS
+  ------------------------- */
+
+  function savePrefab8() {
+    const object = selectedObject8();
+
+    if (!object) {
+      notify8("Select an object first");
+      return;
+    }
+
+    const prefab = JSON.parse(
+      JSON.stringify(object)
+    );
+
+    prefab.id = uid8("prefab");
+
+    M8.prefabs.push(prefab);
+
+    saveCreatorState8();
+
+    notify8("Prefab saved");
+  }
+
+  function spawnPrefab8(index) {
+    const prefab = M8.prefabs[index];
+
+    if (!prefab) return;
+
+    pushHistory8();
+
+    const copy = JSON.parse(
+      JSON.stringify(prefab)
+    );
+
+    copy.id = uid8("obj");
+
+    copy.position = objectPosition8();
+
+    M8.objects.push(copy);
+
+    renderObjects8();
+
+    selectObject8(copy.id);
+  }
+
+  /* -------------------------
+     LOGIC BLOCKS
+  ------------------------- */
+
+  const LOGIC_TYPES8 = [
+    "player_enters",
+    "player_exits",
+    "button_pressed",
+    "timer",
+    "round_start",
+    "round_end",
+    "player_tagged",
+    "object_hit",
+    "random_event"
+  ];
+
+  function addLogic8(type, action, target) {
+    if (!LOGIC_TYPES8.includes(type)) {
+      type = "player_enters";
+    }
+
+    pushHistory8();
+
+    const block = {
+      id: uid8("logic"),
+      trigger: type,
+      action: action || "toggle",
+      target: target || null,
+      delay: 0,
+      enabled: true
+    };
+
+    M8.logic.push(block);
+
+    saveCreatorState8();
+
+    notify8("Logic block added");
+
+    return block;
+  }
+
+  function removeLogic8(id) {
+    const index = M8.logic.findIndex(
+      l => l.id === id
+    );
+
+    if (index < 0) return;
+
+    pushHistory8();
+
+    M8.logic.splice(index, 1);
+
+    saveCreatorState8();
+
+    updateBuilderUI8();
+  }
+
+  function runLogic8(trigger, payload) {
+    M8.logic
+      .filter(l => l.enabled && l.trigger === trigger)
+      .forEach(block => {
+        setTimeout(() => {
+          executeAction8(
+            block.action,
+            block.target,
+            payload
+          );
+        }, clamp8(Number(block.delay) || 0, 0, 30000));
+      });
+  }
+
+  function executeAction8(action, target, payload) {
+    const object = M8.objects.find(
+      o => o.id === target
+    );
+
+    switch (action) {
+      case "toggle":
+        if (object) {
+          object.visible = !object.visible;
+          renderObjects8();
+        }
+        break;
+
+      case "open":
+        if (object) {
+          object.position.y += 3;
+          renderObjects8();
+        }
+        break;
+
+      case "close":
+        if (object) {
+          object.position.y -= 3;
+          renderObjects8();
+        }
+        break;
+
+      case "move":
+        if (object) {
+          object.position.x += 2;
+          renderObjects8();
+        }
+        break;
+
+      case "teleport":
+        if (object && rig8()) {
+          rig8().object3D.position.copy(
+            object.position
+          );
+        }
+        break;
+
+      case "spawn":
+        createObject8(
+          "box",
+          objectPosition8()
+        );
+        break;
+
+      case "random_power":
+        if (
+          window.MonkeyVR &&
+          typeof window.MonkeyVR.randomPower === "function"
+        ) {
+          window.MonkeyVR.randomPower();
+        }
+        break;
+
+      case "announce":
+        notify8(
+          payload?.message ||
+          "Creator event triggered!"
+        );
+        break;
+
+      case "event":
+        if (
+          window.MonkeyVR &&
+          typeof window.MonkeyVR.randomEvent === "function"
+        ) {
+          window.MonkeyVR.randomEvent();
+        }
+        break;
+    }
+  }
+
+  /* -------------------------
+     BUTTON INTERACTION
+  ------------------------- */
+
+  function activateCreatorButton8(object) {
+    if (!object) return;
+
+    runLogic8(
+      "button_pressed",
+      {
+        objectId: object.id
+      }
+    );
+
+    const linked = M8.logic.filter(
+      l =>
+        l.trigger === "button_pressed" &&
+        l.target === object.id &&
+        l.enabled
+    );
+
+    linked.forEach(block => {
+      executeAction8(
+        block.action,
+        block.target
+      );
+    });
+
+    notify8("Button pressed");
+  }
+
+  /* -------------------------
+     TRIGGER ZONES
+  ------------------------- */
+
+  function checkTriggers8() {
+    const rig = rig8();
+
+    if (!rig) return;
+
+    const rp = rig.object3D.position;
+
+    M8.objects
+      .filter(o =>
+        o.type === "trigger" &&
+        o.visible
+      )
+      .forEach(trigger => {
+        const distance =
+          Math.sqrt(
+            Math.pow(
+              rp.x - trigger.position.x,
+              2
+            ) +
+            Math.pow(
+              rp.y - trigger.position.y,
+              2
+            ) +
+            Math.pow(
+              rp.z - trigger.position.z,
+              2
+            )
+          );
+
+        if (distance < 1.8) {
+          runLogic8(
+            "player_enters",
+            {
+              triggerId: trigger.id
+            }
+          );
+        }
+      });
+  }
+
+  /* -------------------------
+     MOVING PLATFORMS
+  ------------------------- */
+
+  function updateMovingObjects8(time) {
+    M8.objects
+      .filter(o =>
+        o.type === "moving" &&
+        o.visible
+      )
+      .forEach(object => {
+        const start =
+          object.metadata.startPosition ||
+          (object.metadata.startPosition =
+            vec8(object.position));
+
+        const speed = 0.0015;
+
+        const wave =
+          Math.sin(time * speed + object.id.length);
+
+        object.position.x =
+          start.x + wave * 3;
+
+        object.position.z =
+          start.z + Math.cos(
+            time * speed +
+            object.id.length
+          ) * 2;
+
+        const el = document.querySelector(
+          `[data-creator-object="${object.id}"]`
+        );
+
+        if (el) {
+          el.object3D.position.set(
+            object.position.x,
+            object.position.y,
+            object.position.z
+          );
+        }
+      });
+  }
+
+  /* -------------------------
+     MAP SAVE FORMAT
+  ------------------------- */
+
+  function getMapPackage8() {
+    return {
+      format: "MONKEYVR_MAP",
+      formatVersion: 2,
+      exportedAt: Date.now(),
+      map: JSON.parse(
+        JSON.stringify(M8.mapData)
+      ),
+      objects: JSON.parse(
+        JSON.stringify(M8.objects)
+      ),
+      logic: JSON.parse(
+        JSON.stringify(M8.logic)
+      ),
+      prefabs: JSON.parse(
+        JSON.stringify(M8.prefabs)
+      )
+    };
+  }
+
+  function applyMapPackage8(data) {
+    if (!data) return false;
+
+    if (
+      data.format &&
+      data.format !== "MONKEYVR_MAP"
+    ) {
+      notify8("Invalid map format");
+      return false;
+    }
+
+    pushHistory8();
+
+    M8.mapData = JSON.parse(
+      JSON.stringify(
+        data.map || M8.mapData
+      )
+    );
+
+    M8.objects = JSON.parse(
+      JSON.stringify(
+        data.objects || []
+      )
+    );
+
+    M8.logic = JSON.parse(
+      JSON.stringify(
+        data.logic || []
+      )
+    );
+
+    M8.prefabs = JSON.parse(
+      JSON.stringify(
+        data.prefabs || []
+      )
+    );
+
+    M8.selected = null;
+
+    renderObjects8();
+
+    saveCreatorState8();
+
+    notify8("Map loaded");
+
+    return true;
+  }
+
+  function saveMap8(slot) {
+    slot = String(slot || "slot1");
+
+    const data = getMapPackage8();
+
+    M8.saveSlots[slot] = data;
+
+    saveCreatorState8();
+
+    notify8("Map saved to " + slot);
+  }
+
+  function loadMap8(slot) {
+    slot = String(slot || "slot1");
+
+    const data = M8.saveSlots[slot];
+
+    if (!data) {
+      notify8("No map in " + slot);
+      return;
+    }
+
+    applyMapPackage8(data);
+  }
+
+  function clearMap8() {
+    if (!confirm("Clear the current creator map?")) {
+      return;
+    }
+
+    pushHistory8();
+
+    M8.objects.length = 0;
+    M8.logic.length = 0;
+    M8.selected = null;
+
+    renderObjects8();
+
+    saveCreatorState8();
+
+    notify8("Map cleared");
+  }
+
+  /* -------------------------
+     LOCAL PERSISTENCE
+  ------------------------- */
+
+  function saveCreatorState8() {
+    try {
+      localStorage.setItem(
+        "MonkeyVR_CreatorV2",
+        JSON.stringify({
+          mapData: M8.mapData,
+          objects: M8.objects,
+          logic: M8.logic,
+          prefabs: M8.prefabs,
+          saveSlots: M8.saveSlots
+        })
+      );
+    } catch (e) {
+      console.warn("Creator save failed", e);
+    }
+  }
+
+  function loadCreatorState8() {
+    try {
+      const raw =
+        localStorage.getItem(
+          "MonkeyVR_CreatorV2"
+        );
+
+      if (!raw) return;
+
+      const data = JSON.parse(raw);
+
+      if (data.mapData) {
+        M8.mapData = data.mapData;
+      }
+
+      if (Array.isArray(data.objects)) {
+        M8.objects = data.objects;
+      }
+
+      if (Array.isArray(data.logic)) {
+        M8.logic = data.logic;
+      }
+
+      if (Array.isArray(data.prefabs)) {
+        M8.prefabs = data.prefabs;
+      }
+
+      if (data.saveSlots) {
+        M8.saveSlots = data.saveSlots;
+      }
+    } catch (e) {
+      console.warn("Creator load failed", e);
+    }
+  }
+
+  /* -------------------------
+     MAP METADATA
+  ------------------------- */
+
+  function editMapMetadata8() {
+    const name = prompt(
+      "Map name:",
+      M8.mapData.name
+    );
+
+    if (name === null) return;
+
+    const description = prompt(
+      "Map description:",
+      M8.mapData.description
+    );
+
+    if (description === null) return;
+
+    const tags = prompt(
+      "Tags separated by commas:",
+      M8.mapData.tags.join(", ")
+    );
+
+    pushHistory8();
+
+    M8.mapData.name =
+      name.trim().slice(0, 60) ||
+      "Untitled Map";
+
+    M8.mapData.description =
+      description.trim().slice(0, 300);
+
+    M8.mapData.tags =
+      tags
+        .split(",")
+        .map(t => t.trim())
+        .filter(Boolean)
+        .slice(0, 10);
+
+    M8.mapData.version++;
+
+    saveCreatorState8();
+
+    updateBuilderUI8();
+
+    notify8("Map info updated");
+  }
+
+  /* -------------------------
+     PUBLISH FOUNDATION
+  ------------------------- */
+
+  function publishMap8() {
+    if (!M8.permissions.publish) {
+      notify8(
+        "Publishing needs server/creator permission"
+      );
+      return;
+    }
+
+    M8.mapData.published = true;
+    M8.mapData.version++;
+
+    saveCreatorState8();
+
+    if (
+      window.MonkeyVROnline &&
+      typeof window.MonkeyVROnline.sendPacket ===
+        "function"
+    ) {
+      window.MonkeyVROnline.sendPacket({
+        type: "map_publish_request",
+        map: getMapPackage8()
+      });
+    }
+
+    notify8("Publish request sent");
+  }
+
+  function unpublishMap8() {
+    M8.mapData.published = false;
+
+    saveCreatorState8();
+
+    if (
+      window.MonkeyVROnline &&
+      typeof window.MonkeyVROnline.sendPacket ===
+        "function"
+    ) {
+      window.MonkeyVROnline.sendPacket({
+        type: "map_unpublish_request",
+        mapId: M8.mapData.id || null
+      });
+    }
+
+    notify8("Map unpublished locally");
+  }
+
+  /* -------------------------
+     COLLABORATORS
+  ------------------------- */
+
+  function addCollaborator8() {
+    const username = prompt(
+      "Enter collaborator username:"
+    );
+
+    if (!username) return;
+
+    if (
+      M8.collaborators.some(
+        c =>
+          c.username.toLowerCase() ===
+          username.toLowerCase()
+      )
+    ) {
+      notify8("Already added");
+      return;
+    }
+
+    M8.collaborators.push({
+      id: uid8("collab"),
+      username: username.trim().slice(0, 24),
+      permission: "edit"
+    });
+
+    saveCreatorState8();
+
+    notify8("Collaborator added");
+  }
+
+  /* -------------------------
+     BUILDER PANEL
+  ------------------------- */
+
+  function createBuilderPanel8() {
+    if (document.querySelector("#m8-builder-panel")) {
+      return;
+    }
+
+    const panel =
+      document.createElement("div");
+
+    panel.id = "m8-builder-panel";
+
+    Object.assign(panel.style, {
+      position: "fixed",
+      top: "12px",
+      right: "12px",
+      width: "min(360px, calc(100vw - 24px))",
+      maxHeight: "calc(100vh - 24px)",
+      overflow: "auto",
+      background: "rgba(12,12,18,.94)",
+      color: "white",
+      border: "1px solid rgba(255,255,255,.18)",
+      borderRadius: "18px",
+      padding: "14px",
+      zIndex: "99998",
+      fontFamily: "Arial,sans-serif",
+      boxSizing: "border-box",
+      backdropFilter: "blur(12px)"
+    });
+
+    panel.innerHTML = `
+      <div style="
+        display:flex;
+        justify-content:space-between;
+        align-items:center;
+        gap:8px;
+        margin-bottom:10px;
+      ">
+        <strong style="font-size:18px">
+          🛠️ CREATOR 2.0
+        </strong>
+        <button id="m8-close">✕</button>
+      </div>
+
+      <div id="m8-map-info"
+        style="
+          padding:9px;
+          border-radius:10px;
+          background:rgba(255,255,255,.07);
+          margin-bottom:10px;
+          font-size:13px;
+        ">
+      </div>
+
+      <div style="
+        display:grid;
+        grid-template-columns:repeat(3,1fr);
+        gap:6px;
+        margin-bottom:10px;
+      ">
+        <button data-m8-tool="select">SELECT</button>
+        <button data-m8-tool="move">MOVE</button>
+        <button data-m8-tool="rotate">ROTATE</button>
+        <button data-m8-tool="scale">SCALE</button>
+        <button data-m8-tool="delete">DELETE</button>
+        <button data-m8-tool="duplicate">DUP</button>
+      </div>
+
+      <div style="
+        display:grid;
+        grid-template-columns:repeat(3,1fr);
+        gap:6px;
+        margin-bottom:10px;
+      ">
+        <button data-m8-action="undo">UNDO</button>
+        <button data-m8-action="redo">REDO</button>
+        <button data-m8-action="copy">COPY</button>
+        <button data-m8-action="paste">PASTE</button>
+        <button data-m8-action="lock">LOCK</button>
+        <button data-m8-action="visibility">HIDE</button>
+      </div>
+
+      <div style="
+        font-size:12px;
+        opacity:.7;
+        margin:8px 0 4px;
+      ">
+        OBJECTS
+      </div>
+
+      <div id="m8-object-buttons"
+        style="
+          display:grid;
+          grid-template-columns:repeat(3,1fr);
+          gap:6px;
+        ">
+      </div>
+
+      <div style="
+        font-size:12px;
+        opacity:.7;
+        margin:12px 0 4px;
+      ">
+        BUILD SETTINGS
+      </div>
+
+      <div style="
+        display:grid;
+        grid-template-columns:1fr 1fr;
+        gap:6px;
+      ">
+        <label>
+          Grid
+          <select id="m8-grid">
+            <option value=".25">0.25</option>
+            <option value=".5" selected>0.5</option>
+            <option value="1">1</option>
+            <option value="2">2</option>
+          </select>
+        </label>
+
+        <label>
+          Rotation
+          <select id="m8-rot">
+            <option value="5">5°</option>
+            <option value="15" selected>15°</option>
+            <option value="30">30°</option>
+            <option value="45">45°</option>
+            <option value="90">90°</option>
+          </select>
+        </label>
+      </div>
+
+      <label style="
+        display:flex;
+        align-items:center;
+        gap:8px;
+        margin-top:8px;
+      ">
+        <input type="checkbox" id="m8-snap" checked>
+        Snap to grid
+      </label>
+
+      <div style="
+        display:grid;
+        grid-template-columns:repeat(2,1fr);
+        gap:6px;
+        margin-top:12px;
+      ">
+        <button id="m8-map-info-btn">
+          MAP INFO
+        </button>
+
+        <button id="m8-prefab">
+          SAVE PREFAB
+        </button>
+
+        <button id="m8-logic">
+          ADD LOGIC
+        </button>
+
+        <button id="m8-collab">
+          COLLABORATOR
+        </button>
+
+        <button id="m8-save">
+          SAVE SLOT
+        </button>
+
+        <button id="m8-load">
+          LOAD SLOT
+        </button>
+
+        <button id="m8-test">
+          TEST MAP
+        </button>
+
+        <button id="m8-exit-test">
+          EXIT TEST
+        </button>
+
+        <button id="m8-publish">
+          PUBLISH
+        </button>
+
+        <button id="m8-unpublish">
+          UNPUBLISH
+        </button>
+
+        <button id="m8-clear">
+          CLEAR MAP
+        </button>
+
+        <button id="m8-close-bottom">
+          CLOSE
+        </button>
+      </div>
+
+      <div id="m8-selection"
+        style="
+          margin-top:12px;
+          padding:9px;
+          border-radius:10px;
+          background:rgba(255,255,255,.06);
+          font-size:12px;
+        ">
+      </div>
+
+      <div id="m8-logic-list"
+        style="
+          margin-top:10px;
+          font-size:12px;
+        ">
+      </div>
+    `;
+
+    document.body.appendChild(panel);
+
+    panel.querySelector("#m8-close")
+      .addEventListener("click", closeBuilder8);
+
+    panel.querySelector("#m8-close-bottom")
+      .addEventListener("click", closeBuilder8);
+
+    panel.querySelectorAll("[data-m8-tool]")
+      .forEach(button => {
+        button.addEventListener("click", () => {
+          useTool8(
+            button.dataset.m8Tool
+          );
+        });
+      });
+
+    panel.querySelectorAll("[data-m8-action]")
+      .forEach(button => {
+        button.addEventListener("click", () => {
+          performAction8(
+            button.dataset.m8Action
+          );
+        });
+      });
+
+    panel.querySelector("#m8-grid")
+      .addEventListener("change", event => {
+        M8.grid =
+          Number(event.target.value) || .5;
+      });
+
+    panel.querySelector("#m8-rot")
+      .addEventListener("change", event => {
+        M8.rotationSnap =
+          Number(event.target.value) || 15;
+      });
+
+    panel.querySelector("#m8-snap")
+      .addEventListener("change", event => {
+        M8.snap = event.target.checked;
+      });
+
+    panel.querySelector("#m8-map-info-btn")
+      .addEventListener(
+        "click",
+        editMapMetadata8
+      );
+
+    panel.querySelector("#m8-prefab")
+      .addEventListener(
+        "click",
+        savePrefab8
+      );
+
+    panel.querySelector("#m8-logic")
+      .addEventListener(
+        "click",
+        logicWizard8
+      );
+
+    panel.querySelector("#m8-collab")
+      .addEventListener(
+        "click",
+        addCollaborator8
+      );
+
+    panel.querySelector("#m8-save")
+      .addEventListener(
+        "click",
+        () => saveMap8("slot1")
+      );
+
+    panel.querySelector("#m8-load")
+      .addEventListener(
+        "click",
+        () => loadMap8("slot1")
+      );
+
+    panel.querySelector("#m8-test")
+      .addEventListener(
+        "click",
+        testMap8
+      );
+
+    panel.querySelector("#m8-exit-test")
+      .addEventListener(
+        "click",
+        exitTestMap8
+      );
+
+    panel.querySelector("#m8-publish")
+      .addEventListener(
+        "click",
+        publishMap8
+      );
+
+    panel.querySelector("#m8-unpublish")
+      .addEventListener(
+        "click",
+        unpublishMap8
+      );
+
+    panel.querySelector("#m8-clear")
+      .addEventListener(
+        "click",
+        clearMap8
+      );
+
+    updateBuilderUI8();
+  }
+
+  function updateBuilderUI8() {
+    const panel =
+      document.querySelector(
+        "#m8-builder-panel"
+      );
+
+    if (!panel) return;
+
+    const info =
+      panel.querySelector(
+        "#m8-map-info"
+      );
+
+    info.innerHTML = `
+      <b>${escape8(M8.mapData.name)}</b><br>
+      ${M8.objects.length} objects ·
+      ${M8.logic.length} logic blocks<br>
+      Version ${M8.mapData.version}<br>
+      ${M8.mapData.published ? "🌐 Published" : "🔒 Unpublished"}
+    `;
+
+    const objectButtons =
+      panel.querySelector(
+        "#m8-object-buttons"
+      );
+
+    objectButtons.innerHTML = "";
+
+    Object.keys(TYPES8).forEach(type => {
+      const button =
+        document.createElement("button");
+
+      button.textContent =
+        TYPES8[type].label;
+
+      button.addEventListener(
+        "click",
+        () => createObject8(type)
+      );
+
+      objectButtons.appendChild(button);
+    });
+
+    const selection =
+      panel.querySelector(
+        "#m8-selection"
+      );
+
+    const object =
+      selectedObject8();
+
+    if (!object) {
+      selection.textContent =
+        "Nothing selected";
+    } else {
+      selection.innerHTML = `
+        <b>${escape8(object.name)}</b><br>
+        ID: ${escape8(object.id)}<br>
+        Pos:
+        ${object.position.x.toFixed(2)},
+        ${object.position.y.toFixed(2)},
+        ${object.position.z.toFixed(2)}<br>
+        Scale:
+        ${object.scale.x.toFixed(2)},
+        ${object.scale.y.toFixed(2)},
+        ${object.scale.z.toFixed(2)}<br>
+        ${object.locked ? "🔒 Locked" : "🔓 Editable"}
+      `;
+    }
+
+    const logicList =
+      panel.querySelector(
+        "#m8-logic-list"
+      );
+
+    logicList.innerHTML =
+      "<b>LOGIC</b>";
+
+    M8.logic.forEach(block => {
+      const row =
+        document.createElement("div");
+
+      row.style.marginTop = "5px";
+      row.style.padding = "6px";
+      row.style.borderRadius = "7px";
+      row.style.background =
+        "rgba(255,255,255,.06)";
+
+      row.innerHTML = `
+        ${escape8(block.trigger)}
+        →
+        ${escape8(block.action)}
+      `;
+
+      logicList.appendChild(row);
+    });
+  }
+
+  function escape8(value) {
+    return String(value ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  /* -------------------------
+     TOOLS
+  ------------------------- */
+
+  function useTool8(tool) {
+    M8.currentTool = tool;
+
+    const object = selectedObject8();
+
+    if (
+      tool !== "select" &&
+      !object
+    ) {
+      notify8("Select an object first");
+      return;
+    }
+
+    switch (tool) {
+      case "move":
+        moveSelected8(0, M8.grid, 0);
+        break;
+
+      case "rotate":
+        rotateSelected8(
+          0,
+          M8.rotationSnap,
+          0
+        );
+        break;
+
+      case "scale":
+        scaleSelected8(
+          1.1,
+          1.1,
+          1.1
+        );
+        break;
+
+      case "delete":
+        deleteSelected8();
+        break;
+
+      case "duplicate":
+        duplicateSelected8();
+        break;
+
+      case "select":
+        notify8("Select mode");
+        break;
+    }
+  }
+
+  function performAction8(action) {
+    switch (action) {
+      case "undo":
+        undo8();
+        break;
+
+      case "redo":
+        redo8();
+        break;
+
+      case "copy":
+        copySelected8();
+        break;
+
+      case "paste":
+        paste8();
+        break;
+
+      case "lock":
+        toggleLock8();
+        break;
+
+      case "visibility":
+        toggleVisibility8();
+        break;
+    }
+
+    updateBuilderUI8();
+  }
+
+  /* -------------------------
+     LOGIC WIZARD
+  ------------------------- */
+
+  function logicWizard8() {
+    const trigger =
+      prompt(
+        "Trigger:\n" +
+        "player_enters\n" +
+        "button_pressed\n" +
+        "timer\n" +
+        "round_start\n" +
+        "round_end\n" +
+        "player_tagged\n" +
+        "object_hit\n" +
+        "random_event",
+        "button_pressed"
+      );
+
+    if (!trigger) return;
+
+    const action =
+      prompt(
+        "Action:\n" +
+        "toggle\n" +
+        "open\n" +
+        "close\n" +
+        "move\n" +
+        "teleport\n" +
+        "spawn\n" +
+        "random_power\n" +
+        "announce\n" +
+        "event",
+        "toggle"
+      );
+
+    if (!action) return;
+
+    const object =
+      selectedObject8();
+
+    addLogic8(
+      trigger.trim(),
+      action.trim(),
+      object ? object.id : null
+    );
+
+    updateBuilderUI8();
+  }
+
+  /* -------------------------
+     TEST MODE
+  ------------------------- */
+
+  function testMap8() {
+    M8.testMode = true;
+    M8.builderOpen = false;
+
+    const panel =
+      document.querySelector(
+        "#m8-builder-panel"
+      );
+
+    if (panel) {
+      panel.style.display = "none";
+    }
+
+    notify8("🧪 TEST MODE");
+
+    if (rig8()) {
+      runLogic8(
+        "round_start",
+        {}
+      );
+    }
+  }
+
+  function exitTestMap8() {
+    M8.testMode = false;
+
+    const panel =
+      document.querySelector(
+        "#m8-builder-panel"
+      );
+
+    if (panel) {
+      panel.style.display = "";
+    }
+
+    notify8("Builder restored");
+  }
+
+  /* -------------------------
+     OPEN / CLOSE
+  ------------------------- */
+
+  function openBuilder8() {
+    createBuilderPanel8();
+
+    const panel =
+      document.querySelector(
+        "#m8-builder-panel"
+      );
+
+    if (panel) {
+      panel.style.display = "";
+    }
+
+    M8.builderOpen = true;
+
+    renderObjects8();
+
+    notify8("🛠️ Creator Mode");
+  }
+
+  function closeBuilder8() {
+    const panel =
+      document.querySelector(
+        "#m8-builder-panel"
+      );
+
+    if (panel) {
+      panel.style.display = "none";
+    }
+
+    M8.builderOpen = false;
+  }
+
+  /* -------------------------
+     KEYBOARD CONTROLS
+  ------------------------- */
+
+  window.addEventListener(
+    "keydown",
+    event => {
+      if (
+        event.target &&
+        (
+          event.target.tagName === "INPUT" ||
+          event.target.tagName === "TEXTAREA" ||
+          event.target.tagName === "SELECT"
+        )
+      ) {
+        return;
+      }
+
+      switch (
+        event.key.toLowerCase()
+      ) {
+        case "b":
+          if (M8.builderOpen) {
+            closeBuilder8();
+          } else {
+            openBuilder8();
+          }
+          break;
+
+        case "delete":
+        case "backspace":
+          if (M8.builderOpen) {
+            deleteSelected8();
+          }
+          break;
+
+        case "escape":
+          if (M8.builderOpen) {
+            M8.selected = null;
+            updateBuilderUI8();
+          }
+          break;
+
+        case "z":
+          if (event.ctrlKey) {
+            event.preventDefault();
+            undo8();
+          }
+          break;
+
+        case "y":
+          if (event.ctrlKey) {
+            event.preventDefault();
+            redo8();
+          }
+          break;
+
+        case "c":
+          if (event.ctrlKey) {
+            event.preventDefault();
+            copySelected8();
+          }
+          break;
+
+        case "v":
+          if (event.ctrlKey) {
+            event.preventDefault();
+            paste8();
+          }
+          break;
+      }
+    }
+  );
+
+  /* -------------------------
+     CLICK BUTTON OBJECTS
+  ------------------------- */
+
+  function installObjectInteraction8() {
+    const scene = scene8();
+
+    if (!scene) return;
+
+    scene.addEventListener(
+      "click",
+      event => {
+        const target =
+          event.target;
+
+        if (!target) return;
+
+        const id =
+          target.dataset?.creatorObject;
+
+        if (!id) return;
+
+        const object =
+          M8.objects.find(
+            o => o.id === id
+          );
+
+        if (!object) return;
+
+        selectObject8(id);
+
+        if (
+          M8.testMode &&
+          object.type === "button"
+        ) {
+          activateCreatorButton8(
+            object
+          );
+        }
+      }
+    );
+  }
+
+  /* -------------------------
+     MAP VERSIONING
+  ------------------------- */
+
+  function createVersion8(note) {
+    return {
+      version:
+        Number(M8.mapData.version || 1),
+      timestamp: Date.now(),
+      note:
+        String(note || "Map update")
+          .slice(0, 120),
+      package: getMapPackage8()
+    };
+  }
+
+  M8.mapData.versions =
+    M8.mapData.versions || [];
+
+  function saveVersion8(note) {
+    if (!Array.isArray(
+      M8.mapData.versions
+    )) {
+      M8.mapData.versions = [];
+    }
+
+    M8.mapData.versions.push(
+      createVersion8(note)
+    );
+
+    if (
+      M8.mapData.versions.length > 20
+    ) {
+      M8.mapData.versions.shift();
+    }
+
+    saveCreatorState8();
+
+    notify8("Version saved");
+  }
+
+  function restoreVersion8(index) {
+    const versions =
+      M8.mapData.versions || [];
+
+    const version =
+      versions[index];
+
+    if (!version) return;
+
+    applyMapPackage8(
+      version.package
+    );
+
+    notify8(
+      "Restored version " +
+      version.version
+    );
+  }
+
+  /* -------------------------
+     COMMUNITY MAP DATA
+  ------------------------- */
+
+  function favoriteMap8() {
+    M8.mapData.favorites =
+      Number(M8.mapData.favorites || 0) + 1;
+
+    saveCreatorState8();
+
+    notify8("⭐ Map favorited");
+  }
+
+  function reportMap8() {
+    M8.mapData.reports =
+      Number(M8.mapData.reports || 0) + 1;
+
+    saveCreatorState8();
+
+    notify8(
+      "Map report recorded locally"
+    );
+  }
+
+  function playMap8() {
+    M8.mapData.plays =
+      Number(M8.mapData.plays || 0) + 1;
+
+    saveCreatorState8();
+
+    testMap8();
+  }
+
+  /* -------------------------
+     THUMBNAIL PLACEHOLDER
+  ------------------------- */
+
+  function createMapThumbnailData8() {
+    return {
+      type: "thumbnail-placeholder",
+      generatedAt: Date.now(),
+      note:
+        "Server/client thumbnail capture can be connected later."
+    };
+  }
+
+  M8.mapData.thumbnail =
+    M8.mapData.thumbnail ||
+    createMapThumbnailData8();
+
+  /* -------------------------
+     MAP BROWSER FOUNDATION
+  ------------------------- */
+
+  function openMapBrowser8() {
+    let browser =
+      document.querySelector(
+        "#m8-map-browser"
+      );
+
+    if (!browser) {
+      browser =
+        document.createElement("div");
+
+      browser.id =
+        "m8-map-browser";
+
+      Object.assign(browser.style, {
+        position: "fixed",
+        inset: "0",
+        zIndex: "99997",
+        background: "rgba(0,0,0,.88)",
+        color: "white",
+        fontFamily: "Arial,sans-serif",
+        padding: "20px",
+        boxSizing: "border-box",
+        overflow: "auto"
+      });
+
+      browser.innerHTML = `
+        <div style="
+          max-width:700px;
+          margin:auto;
+        ">
+          <h2>🌐 COMMUNITY MAPS</h2>
+
+          <p style="opacity:.7">
+            Online map discovery will use the
+            multiplayer backend when connected.
+          </p>
+
+          <div id="m8-local-map-card"
+            style="
+              padding:15px;
+              background:rgba(255,255,255,.08);
+              border-radius:14px;
+              margin:15px 0;
+            ">
+          </div>
+
+          <button id="m8-browser-close">
+            CLOSE
+          </button>
+        </div>
+      `;
+
+      document.body.appendChild(
+        browser
+      );
+
+      browser
+        .querySelector(
+          "#m8-browser-close"
+        )
+        .addEventListener(
+          "click",
+          () => {
+            browser.remove();
+          }
+        );
+    }
+
+    const card =
+      browser.querySelector(
+        "#m8-local-map-card"
+      );
+
+    card.innerHTML = `
+      <h3>
+        ${escape8(M8.mapData.name)}
+      </h3>
+
+      <p>
+        ${escape8(
+          M8.mapData.description ||
+          "No description"
+        )}
+      </p>
+
+      <p>
+        🧱 ${M8.objects.length}
+        objects
+        · ⭐ ${M8.mapData.favorites}
+        · ▶️ ${M8.mapData.plays}
+      </p>
+
+      <button id="m8-play-map">
+        PLAY
+      </button>
+
+      <button id="m8-favorite-map">
+        ⭐ FAVORITE
+      </button>
+
+      <button id="m8-report-map">
+        REPORT
+      </button>
+    `;
+
+    card
+      .querySelector("#m8-play-map")
+      .addEventListener(
+        "click",
+        playMap8
+      );
+
+    card
+      .querySelector("#m8-favorite-map")
+      .addEventListener(
+        "click",
+        favoriteMap8
+      );
+
+    card
+      .querySelector("#m8-report-map")
+      .addEventListener(
+        "click",
+        reportMap8
+      );
+  }
+
+  /* -------------------------
+     EXPORT / IMPORT TEXT
+  ------------------------- */
+
+  function exportMapText8() {
+    const data =
+      JSON.stringify(
+        getMapPackage8()
+      );
+
+    try {
+      if (
+        navigator.clipboard &&
+        navigator.clipboard.writeText
+      ) {
+        navigator.clipboard
+          .writeText(data)
+          .then(() => {
+            notify8(
+              "Map data copied"
+            );
+          })
+          .catch(() => {
+            prompt(
+              "Copy this map data:",
+              data
+            );
+          });
+      } else {
+        prompt(
+          "Copy this map data:",
+          data
+        );
+      }
+    } catch (e) {
+      prompt(
+        "Copy this map data:",
+        data
+      );
+    }
+  }
+
+  function importMapText8() {
+    const raw =
+      prompt(
+        "Paste Monkey VR map data:"
+      );
+
+    if (!raw) return;
+
+    try {
+      const data =
+        JSON.parse(raw);
+
+      applyMapPackage8(data);
+    } catch (e) {
+      notify8(
+        "Invalid map data"
+      );
+    }
+  }
+
+  /* -------------------------
+     PUBLIC CREATOR API
+  ------------------------- */
+
+  window.MonkeyVRCreator = {
+    state: M8,
+
+    open: openBuilder8,
+    close: closeBuilder8,
+
+    create: createObject8,
+    select: selectObject8,
+    delete: deleteSelected8,
+    duplicate: duplicateSelected8,
+
+    move: moveSelected8,
+    rotate: rotateSelected8,
+    scale: scaleSelected8,
+
+    undo: undo8,
+    redo: redo8,
+
+    copy: copySelected8,
+    paste: paste8,
+
+    saveMap: saveMap8,
+    loadMap: loadMap8,
+    clearMap: clearMap8,
+
+    addLogic: addLogic8,
+    removeLogic: removeLogic8,
+
+    test: testMap8,
+    exitTest: exitTestMap8,
+
+    publish: publishMap8,
+    unpublish: unpublishMap8,
+
+    saveVersion: saveVersion8,
+    restoreVersion: restoreVersion8,
+
+    favorite: favoriteMap8,
+    report: reportMap8,
+
+    browser: openMapBrowser8,
+
+    export: exportMapText8,
+    import: importMapText8,
+
+    addCollaborator: addCollaborator8
+  };
+
+  /* -------------------------
+     GAME LOOP
+  ------------------------- */
+
+  let last8 = performance.now();
+
+  function creatorLoop8(now) {
+    const dt =
+      clamp8(
+        (now - last8) / 1000,
+        0,
+        .1
+      );
+
+    last8 = now;
+
+    if (
+      M8.objects.length
+    ) {
+      updateMovingObjects8(
+        now
+      );
+    }
+
+    if (
+      M8.testMode
+    ) {
+      checkTriggers8();
+    }
+
+    requestAnimationFrame(
+      creatorLoop8
+    );
+  }
+
+  /* -------------------------
+     INITIALIZE
+  ------------------------- */
+
+  function initCreator8() {
+    loadCreatorState8();
+
+    ensureBuilderRoot();
+
+    renderObjects8();
+
+    installObjectInteraction8();
+
+    createBuilderPanel8();
+
+    closeBuilder8();
+
+    creatorLoop8(
+      performance.now()
+    );
+
+    console.log(
+      "Monkey VR Creator 2.0 loaded"
+    );
+  }
+
+  if (
+    document.readyState ===
+    "loading"
+  ) {
+    document.addEventListener(
+      "DOMContentLoaded",
+      initCreator8,
+      { once: true }
+    );
+  } else {
+    initCreator8();
+  }
+
+})();   
+  /* =========================================================
+   MONKEY VR — PART 9
+   SOCIAL + PLAYER EXPERIENCE 2.0
+   ========================================================= */
+
+(function () {
+  "use strict";
+
+  const M9 = {
+    version: "9.0",
+
+    profile: {
+      username: "Player",
+      displayName: "Player",
+      bio: "",
+      title: "New Monkey",
+      banner: "default",
+      level: 1,
+      xp: 0,
+      coins: 0
+    },
+
+    friends: [],
+    requests: [],
+    recentPlayers: [],
+    blocked: [],
+    muted: [],
+
+    party: {
+      id: null,
+      leader: false,
+      members: [],
+      maxSize: 8
+    },
+
+    notifications: [],
+
+    emotes: [
+      "wave",
+      "dance",
+      "laugh",
+      "point",
+      "celebrate",
+      "sit",
+      "flex",
+      "highfive",
+      "fistbump"
+    ],
+
+    selectedEmote: null,
+
+    settings: {
+      showNames: true,
+      showStatus: true,
+      notifications: true,
+      chatSounds: true,
+      compactUI: false,
+      safeChat: true,
+      proximityChat: true
+    }
+  };
+
+  /* -------------------------------------------------------
+     HELPERS
+  ------------------------------------------------------- */
+
+  function uid9(prefix) {
+    return prefix + "_" +
+      Math.random()
+        .toString(36)
+        .slice(2, 10);
+  }
+
+  function esc9(value) {
+    return String(value ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function notify9(message) {
+    if (!M9.settings.notifications) return;
+
+    let toast =
+      document.querySelector("#m9-toast");
+
+    if (!toast) {
+      toast =
+        document.createElement("div");
+
+      toast.id = "m9-toast";
+
+      Object.assign(toast.style, {
+        position: "fixed",
+        left: "50%",
+        bottom: "28px",
+        transform: "translateX(-50%)",
+        padding: "11px 16px",
+        background: "rgba(10,10,15,.92)",
+        color: "#fff",
+        borderRadius: "12px",
+        zIndex: "100000",
+        fontFamily: "Arial,sans-serif",
+        fontSize: "14px",
+        pointerEvents: "none",
+        opacity: "0",
+        transition: "opacity .18s"
+      });
+
+      document.body.appendChild(toast);
+    }
+
+    toast.textContent = message;
+    toast.style.opacity = "1";
+
+    clearTimeout(toast._timer);
+
+    toast._timer =
+      setTimeout(() => {
+        toast.style.opacity = "0";
+      }, 1800);
+  }
+
+  function save9() {
+    try {
+      localStorage.setItem(
+        "MonkeyVR_SocialV2",
+        JSON.stringify(M9)
+      );
+    } catch (e) {
+      console.warn(
+        "Social save failed",
+        e
+      );
+    }
+  }
+
+  function load9() {
+    try {
+      const raw =
+        localStorage.getItem(
+          "MonkeyVR_SocialV2"
+        );
+
+      if (!raw) return;
+
+      const data =
+        JSON.parse(raw);
+
+      if (data.profile)
+        M9.profile = data.profile;
+
+      if (Array.isArray(data.friends))
+        M9.friends = data.friends;
+
+      if (Array.isArray(data.requests))
+        M9.requests = data.requests;
+
+      if (Array.isArray(data.recentPlayers))
+        M9.recentPlayers =
+          data.recentPlayers;
+
+      if (Array.isArray(data.blocked))
+        M9.blocked = data.blocked;
+
+      if (Array.isArray(data.muted))
+        M9.muted = data.muted;
+
+      if (data.party)
+        M9.party = data.party;
+
+      if (Array.isArray(data.notifications))
+        M9.notifications =
+          data.notifications;
+
+      if (data.settings)
+        M9.settings = {
+          ...M9.settings,
+          ...data.settings
+        };
+    } catch (e) {
+      console.warn(
+        "Social load failed",
+        e
+      );
+    }
+  }
+
+  /* -------------------------------------------------------
+     PLAYER PROFILE
+     ------------------------------------------------------- */
+
+  function openProfile9(username) {
+    username =
+      username ||
+      M9.profile.username;
+
+    const friend =
+      M9.friends.find(
+        f =>
+          f.username.toLowerCase() ===
+          username.toLowerCase()
+      );
+
+    const recent =
+      M9.recentPlayers.find(
+        f =>
+          f.username.toLowerCase() ===
+          username.toLowerCase()
+      );
+
+    const player =
+      friend ||
+      recent || {
+        username
+      };
+
+    showProfileCard9(player);
+  }
+
+  function showProfileCard9(player) {
+    let card =
+      document.querySelector(
+        "#m9-profile-card"
+      );
+
+    if (card) card.remove();
+
+    card =
+      document.createElement("div");
+
+    card.id =
+      "m9-profile-card";
+
+    Object.assign(card.style, {
+      position: "fixed",
+      left: "50%",
+      top: "50%",
+      transform: "translate(-50%,-50%)",
+      width: "min(360px,calc(100vw - 30px))",
+      background: "rgba(12,12,18,.97)",
+      color: "#fff",
+      borderRadius: "18px",
+      padding: "18px",
+      zIndex: "100001",
+      fontFamily: "Arial,sans-serif",
+      boxSizing: "border-box",
+      border: "1px solid rgba(255,255,255,.15)"
+    });
+
+    const isBlocked =
+      M9.blocked.includes(
+        player.username
+      );
+
+    const isMuted =
+      M9.muted.includes(
+        player.username
+      );
+
+    card.innerHTML = `
+      <div style="
+        display:flex;
+        justify-content:space-between;
+        align-items:center;
+      ">
+        <strong style="font-size:20px">
+          🐒 ${esc9(player.username)}
+        </strong>
+
+        <button id="m9-profile-close">
+          ✕
+        </button>
+      </div>
+
+      <div style="
+        margin-top:14px;
+        padding:14px;
+        border-radius:14px;
+        background:rgba(255,255,255,.07);
+      ">
+        <div>
+          Title:
+          ${esc9(player.title || "New Monkey")}
+        </div>
+
+        <div style="margin-top:5px">
+          Level:
+          ${Number(player.level || 1)}
+        </div>
+
+        <div style="margin-top:5px">
+          Status:
+          ${esc9(player.status || "Offline")}
+        </div>
+      </div>
+
+      <div style="
+        display:grid;
+        grid-template-columns:1fr 1fr;
+        gap:7px;
+        margin-top:12px;
+      ">
+        <button id="m9-add-friend">
+          ADD FRIEND
+        </button>
+
+        <button id="m9-invite">
+          INVITE
+        </button>
+
+        <button id="m9-mute">
+          ${isMuted ? "UNMUTE" : "MUTE"}
+        </button>
+
+        <button id="m9-block">
+          ${isBlocked ? "UNBLOCK" : "BLOCK"}
+        </button>
+
+        <button id="m9-report">
+          REPORT
+        </button>
+      </div>
+    `;
+
+    document.body.appendChild(card);
+
+    card
+      .querySelector(
+        "#m9-profile-close"
+      )
+      .addEventListener(
+        "click",
+        () => card.remove()
+      );
+
+    card
+      .querySelector(
+        "#m9-add-friend"
+      )
+      .addEventListener(
+        "click",
+        () => {
+          sendFriendRequest9(
+            player.username
+          );
+        }
+      );
+
+    card
+      .querySelector(
+        "#m9-invite"
+      )
+      .addEventListener(
+        "click",
+        () => {
+          invitePlayer9(
+            player.username
+          );
+        }
+      );
+
+    card
+      .querySelector(
+        "#m9-mute"
+      )
+      .addEventListener(
+        "click",
+        () => {
+          toggleMute9(
+            player.username
+          );
+
+          card.remove();
+        }
+      );
+
+    card
+      .querySelector(
+        "#m9-block"
+      )
+      .addEventListener(
+        "click",
+        () => {
+          toggleBlock9(
+            player.username
+          );
+
+          card.remove();
+        }
+      );
+
+    card
+      .querySelector(
+        "#m9-report"
+      )
+      .addEventListener(
+        "click",
+        () => {
+          reportPlayer9(
+            player.username
+          );
+
+          card.remove();
+        }
+      );
+  }
+
+  /* -------------------------------------------------------
+     FRIENDS
+     ------------------------------------------------------- */
+
+  function sendFriendRequest9(username) {
+    username =
+      String(username || "")
+        .trim()
+        .slice(0, 24);
+
+    if (!username) return;
+
+    if (
+      username.toLowerCase() ===
+      M9.profile.username.toLowerCase()
+    ) {
+      notify9(
+        "You cannot add yourself"
+      );
+      return;
+    }
+
+    if (
+      M9.friends.some(
+        f =>
+          f.username.toLowerCase() ===
+          username.toLowerCase()
+      )
+    ) {
+      notify9("Already friends");
+      return;
+    }
+
+    if (
+      M9.requests.some(
+        r =>
+          r.username.toLowerCase() ===
+          username.toLowerCase()
+      )
+    ) {
+      notify9("Request already sent");
+      return;
+    }
+
+    M9.requests.push({
+      id: uid9("request"),
+      username,
+      direction: "outgoing",
+      created: Date.now()
+    });
+
+    sendOnline9({
+      type: "friend_request",
+      username
+    });
+
+    save9();
+
+    notify9(
+      "Friend request sent to " +
+      username
+    );
+  }
+
+  function receiveFriendRequest9(username) {
+    if (!username) return;
+
+    M9.requests.push({
+      id: uid9("request"),
+      username,
+      direction: "incoming",
+      created: Date.now()
+    });
+
+    save9();
+
+    notify9(
+      "👋 Friend request from " +
+      username
+    );
+  }
+
+  function acceptFriend9(requestId) {
+    const index =
+      M9.requests.findIndex(
+        r => r.id === requestId
+      );
+
+    if (index < 0) return;
+
+    const request =
+      M9.requests[index];
+
+    M9.friends.push({
+      id: uid9("friend"),
+      username: request.username,
+      status: "Online",
+      level: 1,
+      title: "New Monkey",
+      added: Date.now()
+    });
+
+    M9.requests.splice(
+      index,
+      1
+    );
+
+    sendOnline9({
+      type: "friend_accept",
+      username: request.username
+    });
+
+    save9();
+
+    notify9(
+      "⭐ Added " +
+      request.username
+    );
+
+    updateSocialUI9();
+  }
+
+  function declineFriend9(requestId) {
+    const index =
+      M9.requests.findIndex(
+        r => r.id === requestId
+      );
+
+    if (index < 0) return;
+
+    M9.requests.splice(
+      index,
+      1
+    );
+
+    save9();
+
+    updateSocialUI9();
+  }
+
+  function removeFriend9(username) {
+    M9.friends =
+      M9.friends.filter(
+        f =>
+          f.username !== username
+      );
+
+    sendOnline9({
+      type: "friend_remove",
+      username
+    });
+
+    save9();
+
+    updateSocialUI9();
+  }
+
+  /* -------------------------------------------------------
+     BLOCK / MUTE
+     ------------------------------------------------------- */
+
+  function toggleBlock9(username) {
+    if (!username) return;
+
+    const index =
+      M9.blocked.indexOf(
+        username
+      );
+
+    if (index >= 0) {
+      M9.blocked.splice(
+        index,
+        1
+      );
+
+      notify9(
+        username + " unblocked"
+      );
+    } else {
+      M9.blocked.push(
+        username
+      );
+
+      notify9(
+        username + " blocked"
+      );
+    }
+
+    sendOnline9({
+      type: "block_update",
+      username,
+      blocked:
+        M9.blocked.includes(username)
+    });
+
+    save9();
+  }
+
+  function toggleMute9(username) {
+    if (!username) return;
+
+    const index =
+      M9.muted.indexOf(
+        username
+      );
+
+    if (index >= 0) {
+      M9.muted.splice(
+        index,
+        1
+      );
+
+      notify9(
+        username + " unmuted"
+      );
+    } else {
+      M9.muted.push(
+        username
+      );
+
+      notify9(
+        username + " muted"
+      );
+    }
+
+    sendOnline9({
+      type: "mute_update",
+      username,
+      muted:
+        M9.muted.includes(username)
+    });
+
+    save9();
+  }
+
+  /* -------------------------------------------------------
+     REPORT
+     ------------------------------------------------------- */
+
+  function reportPlayer9(username) {
+    const reason =
+      prompt(
+        "Report reason:\n" +
+        "1 = Harassment\n" +
+        "2 = Cheating\n" +
+        "3 = Inappropriate chat\n" +
+        "4 = Other",
+        "1"
+      );
+
+    if (reason === null) return;
+
+    const report = {
+      id: uid9("report"),
+      username,
+      reason:
+        String(reason)
+          .slice(0, 120),
+      created: Date.now()
+    };
+
+    sendOnline9({
+      type: "player_report",
+      report
+    });
+
+    notify9(
+      "Report submitted"
+    );
+  }
+
+  /* -------------------------------------------------------
+     RECENT PLAYERS
+     ------------------------------------------------------- */
+
+  function addRecentPlayer9(player) {
+    if (!player?.username) return;
+
+    if (
+      player.username ===
+      M9.profile.username
+    ) {
+      return;
+    }
+
+    M9.recentPlayers =
+      M9.recentPlayers.filter(
+        p =>
+          p.username !==
+          player.username
+      );
+
+    M9.recentPlayers.unshift({
+      ...player,
+      seen: Date.now()
+    });
+
+    M9.recentPlayers =
+      M9.recentPlayers.slice(
+        0,
+        50
+      );
+
+    save9();
+  }
+
+  /* -------------------------------------------------------
+     PARTY
+     ------------------------------------------------------- */
+
+  function createParty9() {
+    if (M9.party.id) {
+      notify9("Already in a party");
+      return;
+    }
+
+    M9.party = {
+      id: uid9("party"),
+      leader: true,
+      members: [
+        {
+          username:
+            M9.profile.username,
+          leader: true,
+          ready: false
+        }
+      ],
+      maxSize: 8
+    };
+
+    sendOnline9({
+      type: "party_create",
+      party: M9.party
+    });
+
+    save9();
+
+    notify9(
+      "🎉 Party created"
+    );
+
+    updateSocialUI9();
+  }
+
+  function leaveParty9() {
+    if (!M9.party.id) return;
+
+    sendOnline9({
+      type: "party_leave",
+      partyId:
+        M9.party.id
+    });
+
+    M9.party = {
+      id: null,
+      leader: false,
+      members: [],
+      maxSize: 8
+    };
+
+    save9();
+
+    notify9(
+      "Left party"
+    );
+
+    updateSocialUI9();
+  }
+
+  function invitePlayer9(username) {
+    if (!username) return;
+
+    if (!M9.party.id) {
+      createParty9();
+    }
+
+    sendOnline9({
+      type: "party_invite",
+      username,
+      partyId:
+        M9.party.id
+    });
+
+    notify9(
+      "Party invite sent"
+    );
+  }
+
+  function joinParty9(data) {
+    if (!data?.partyId) return;
+
+    M9.party = {
+      id: data.partyId,
+      leader: false,
+      members:
+        data.members || [],
+      maxSize:
+        Number(data.maxSize) || 8
+    };
+
+    save9();
+
+    notify9(
+      "Joined party"
+    );
+
+    updateSocialUI9();
+  }
+
+  /* -------------------------------------------------------
+     ONLINE SEND BRIDGE
+     ------------------------------------------------------- */
+
+  function sendOnline9(packet) {
+    try {
+      if (
+        window.MonkeyVROnline &&
+        typeof
+          window.MonkeyVROnline.sendPacket ===
+          "function"
+      ) {
+        window.MonkeyVROnline
+          .sendPacket(packet);
+
+        return true;
+      }
+
+      if (
+        window.MonkeyVRMultiplayer &&
+        typeof
+          window.MonkeyVRMultiplayer.sendPacket ===
+          "function"
+      ) {
+        window.MonkeyVRMultiplayer
+          .sendPacket(packet);
+
+        return true;
+      }
+    } catch (e) {
+      console.warn(
+        "Online bridge error",
+        e
+      );
+    }
+
+    return false;
+  }
+
+  /* -------------------------------------------------------
+     NOTIFICATION SYSTEM
+     ------------------------------------------------------- */
+
+  function addNotification9(
+    title,
+    message,
+    type
+  ) {
+    const notification = {
+      id: uid9("notification"),
+      title:
+        String(title || "Notification")
+          .slice(0, 80),
+      message:
+        String(message || "")
+          .slice(0, 200),
+      type:
+        type || "general",
+      created: Date.now(),
+      read: false
+    };
+
+    M9.notifications.unshift(
+      notification
+    );
+
+    M9.notifications =
+      M9.notifications.slice(
+        0,
+        100
+      );
+
+    save9();
+
+    notify9(
+      notification.title
+    );
+
+    updateSocialUI9();
+  }
+
+  function markNotificationsRead9() {
+    M9.notifications.forEach(
+      n => {
+        n.read = true;
+      }
+    );
+
+    save9();
+
+    updateSocialUI9();
+  }
+
+  function clearNotifications9() {
+    M9.notifications.length = 0;
+
+    save9();
+
+    updateSocialUI9();
+  }
+
+  /* -------------------------------------------------------
+     EMOTES
+     ------------------------------------------------------- */
+
+  function playEmote9(name) {
+    if (
+      !M9.emotes.includes(name)
+    ) {
+      return;
+    }
+
+    M9.selectedEmote = name;
+
+    sendOnline9({
+      type: "emote",
+      username:
+        M9.profile.username,
+      emote: name
+    });
+
+    showEmoteVisual9(name);
+
+    setTimeout(() => {
+      if (
+        M9.selectedEmote === name
+      ) {
+        M9.selectedEmote = null;
+      }
+    }, 1800);
+  }
+
+  function showEmoteVisual9(name) {
+    let bubble =
+      document.querySelector(
+        "#m9-emote-bubble"
+      );
+
+    if (!bubble) {
+      bubble =
+        document.createElement("div");
+
+      bubble.id =
+        "m9-emote-bubble";
+
+      Object.assign(
+        bubble.style,
+        {
+          position: "fixed",
+          left: "50%",
+          top: "20%",
+          transform:
+            "translateX(-50%)",
+          background:
+            "rgba(0,0,0,.72)",
+          color: "#fff",
+          padding:
+            "14px 22px",
+          borderRadius:
+            "18px",
+          fontSize:
+            "28px",
+          zIndex:
+            "100000",
+          pointerEvents:
+            "none",
+          fontFamily:
+            "Arial"
+        }
+      );
+
+      document.body.appendChild(
+        bubble
+      );
+    }
+
+    const icons = {
+      wave: "👋",
+      dance: "💃",
+      laugh: "😂",
+      point: "👉",
+      celebrate: "🎉",
+      sit: "🧎",
+      flex: "💪",
+      highfive: "🖐️",
+      fistbump: "👊"
+    };
+
+    bubble.textContent =
+      (icons[name] || "🐒") +
+      " " +
+      name.toUpperCase();
+
+    clearTimeout(
+      bubble._timer
+    );
+
+    bubble._timer =
+      setTimeout(() => {
+        bubble.remove();
+      }, 1800);
+  }
+
+  /* -------------------------------------------------------
+     PROFILE EDITOR
+     ------------------------------------------------------- */
+
+  function editProfile9() {
+    const username =
+      prompt(
+        "Display username:",
+        M9.profile.displayName ||
+        M9.profile.username
+      );
+
+    if (username === null)
+      return;
+
+    const bio =
+      prompt(
+        "Bio:",
+        M9.profile.bio || ""
+      );
+
+    if (bio === null)
+      return;
+
+    const title =
+      prompt(
+        "Title:",
+        M9.profile.title ||
+        "New Monkey"
+      );
+
+    if (title === null)
+      return;
+
+    M9.profile.displayName =
+      username
+        .trim()
+        .slice(0, 24) ||
+      "Player";
+
+    M9.profile.bio =
+      bio
+        .trim()
+        .slice(0, 180);
+
+    M9.profile.title =
+      title
+        .trim()
+        .slice(0, 30) ||
+      "New Monkey";
+
+    save9();
+
+    notify9(
+      "Profile updated"
+    );
+
+    updateSocialUI9();
+  }
+
+  /* -------------------------------------------------------
+     SOCIAL PANEL
+     ------------------------------------------------------- */
+
+  function openSocial9() {
+    let panel =
+      document.querySelector(
+        "#m9-social-panel"
+      );
+
+    if (!panel) {
+      panel =
+        document.createElement("div");
+
+      panel.id =
+        "m9-social-panel";
+
+      Object.assign(
+        panel.style,
+        {
+          position: "fixed",
+          top: "12px",
+          left: "12px",
+          width:
+            "min(430px,calc(100vw - 24px))",
+          maxHeight:
+            "calc(100vh - 24px)",
+          overflow:
+            "auto",
+          background:
+            "rgba(10,10,16,.96)",
+          color:
+            "#fff",
+          borderRadius:
+            "18px",
+          padding:
+            "15px",
+          zIndex:
+            "99999",
+          fontFamily:
+            "Arial,sans-serif",
+          boxSizing:
+            "border-box",
+          border:
+            "1px solid rgba(255,255,255,.16)"
+        }
+      );
+
+      panel.innerHTML = `
+        <div style="
+          display:flex;
+          justify-content:space-between;
+          align-items:center;
+        ">
+          <strong style="font-size:20px">
+            👥 SOCIAL
+          </strong>
+
+          <button id="m9-close">
+            ✕
+          </button>
+        </div>
+
+        <div id="m9-profile"
+          style="
+            margin-top:12px;
+            padding:12px;
+            background:
+              rgba(255,255,255,.07);
+            border-radius:13px;
+          ">
+        </div>
+
+        <div style="
+          display:grid;
+          grid-template-columns:
+            repeat(2,1fr);
+          gap:7px;
+          margin-top:10px;
+        ">
+          <button id="m9-edit">
+            EDIT PROFILE
+          </button>
+
+          <button id="m9-party">
+            PARTY
+          </button>
+
+          <button id="m9-emotes">
+            EMOTES
+          </button>
+
+          <button id="m9-notifications">
+            NOTIFICATIONS
+          </button>
+
+          <button id="m9-browser">
+            MAP BROWSER
+          </button>
+
+          <button id="m9-creator">
+            CREATOR
+          </button>
+        </div>
+
+        <h3>
+          FRIENDS
+        </h3>
+
+        <div id="m9-friends"></div>
+
+        <h3>
+          REQUESTS
+        </h3>
+
+        <div id="m9-requests"></div>
+
+        <h3>
+          RECENT PLAYERS
+        </h3>
+
+        <div id="m9-recent"></div>
+
+        <h3>
+          BLOCKED
+        </h3>
+
+        <div id="m9-blocked"></div>
+      `;
+
+      document.body.appendChild(
+        panel
+      );
+
+      panel
+        .querySelector("#m9-close")
+        .addEventListener(
+          "click",
+          closeSocial9
+        );
+
+      panel
+        .querySelector("#m9-edit")
+        .addEventListener(
+          "click",
+          editProfile9
+        );
+
+      panel
+        .querySelector("#m9-party")
+        .addEventListener(
+          "click",
+          partyPanel9
+        );
+
+      panel
+        .querySelector("#m9-emotes")
+        .addEventListener(
+          "click",
+          emotePanel9
+        );
+
+      panel
+        .querySelector(
+          "#m9-notifications"
+        )
+        .addEventListener(
+          "click",
+          notificationPanel9
+        );
+
+      panel
+        .querySelector("#m9-browser")
+        .addEventListener(
+          "click",
+          () => {
+            if (
+              window.MonkeyVRCreator &&
+              typeof
+                window.MonkeyVRCreator.browser ===
+                "function"
+            ) {
+              window.MonkeyVRCreator
+                .browser();
+            }
+          }
+        );
+
+      panel
+        .querySelector("#m9-creator")
+        .addEventListener(
+          "click",
+          () => {
+            if (
+              window.MonkeyVRCreator &&
+              typeof
+                window.MonkeyVRCreator.open ===
+                "function"
+            ) {
+              window.MonkeyVRCreator
+                .open();
+            }
+          }
+        );
+    }
+
+    panel.style.display = "";
+
+    updateSocialUI9();
+  }
+
+  function closeSocial9() {
+    const panel =
+      document.querySelector(
+        "#m9-social-panel"
+      );
+
+    if (panel) {
+      panel.style.display =
+        "none";
+    }
+  }
+
+  function updateSocialUI9() {
+    const panel =
+      document.querySelector(
+        "#m9-social-panel"
+      );
+
+    if (!panel) return;
+
+    const profile =
+      panel.querySelector(
+        "#m9-profile"
+      );
+
+    profile.innerHTML = `
+      <b>
+        🐒 ${esc9(
+          M9.profile.displayName ||
+          M9.profile.username
+        )}
+      </b>
+
+      <div style="opacity:.7;margin-top:4px">
+        ${esc9(
+          M9.profile.title ||
+          "New Monkey"
+        )}
+      </div>
+
+      <div style="margin-top:5px">
+        Level ${Number(
+          M9.profile.level || 1
+        )}
+        ·
+        ${Number(
+          M9.profile.coins || 0
+        )} coins
+      </div>
+
+      <div style="
+        opacity:.7;
+        margin-top:5px;
+      ">
+        ${esc9(
+          M9.profile.bio || 
+          "No bio yet."
+        )}
+      </div>
+    `;
+
+    const friends =
+      panel.querySelector(
+        "#m9-friends"
+      );
+
+    friends.innerHTML = "";
+
+    if (!M9.friends.length) {
+      friends.innerHTML =
+        `<div style="opacity:.6">
+          No friends yet.
+        </div>`;
+    }
+
+    M9.friends.forEach(
+      friend => {
+        const row =
+          document.createElement("div");
+
+        row.style.cssText =
+          "display:flex;" +
+          "align-items:center;" +
+          "justify-content:space-between;" +
+          "gap:6px;" +
+          "padding:7px;" +
+          "margin:4px 0;" +
+          "background:rgba(255,255,255,.05);" +
+          "border-radius:9px;";
+
+        row.innerHTML = `
+          <span>
+            🟢 ${esc9(friend.username)}
+          </span>
+
+          <span>
+            <button
+              data-profile="${esc9(
+                friend.username
+              )}">
+              VIEW
+            </button>
+
+            <button
+              data-remove="${esc9(
+                friend.username
+              )}">
+              ✕
+            </button>
+          </span>
+        `;
+
+        row
+          .querySelector(
+            "[data-profile]"
+          )
+          .addEventListener(
+            "click",
+            () =>
+              openProfile9(
+                friend.username
+              )
+          );
+
+        row
+          .querySelector(
+            "[data-remove]"
+          )
+          .addEventListener(
+            "click",
+            () =>
+              removeFriend9(
+                friend.username
+              )
+          );
+
+        friends.appendChild(row);
+      }
+    );
+
+    const requests =
+      panel.querySelector(
+        "#m9-requests"
+      );
+
+    requests.innerHTML = "";
+
+    if (!M9.requests.length) {
+      requests.innerHTML =
+        `<div style="opacity:.6">
+          No requests.
+        </div>`;
+    }
+
+    M9.requests.forEach(
+      request => {
+        const row =
+          document.createElement("div");
+
+        row.style.cssText =
+          "padding:7px;" +
+          "margin:4px 0;" +
+          "background:rgba(255,255,255,.05);" +
+          "border-radius:9px;";
+
+        if (
+          request.direction ===
+          "incoming"
+        ) {
+          row.innerHTML = `
+            👋 ${esc9(request.username)}
+
+            <button>
+              ACCEPT
+            </button>
+
+            <button>
+              DECLINE
+            </button>
+          `;
+
+          const buttons =
+            row.querySelectorAll(
+              "button"
+            );
+
+          buttons[0]
+            .addEventListener(
+              "click",
+              () =>
+                acceptFriend9(
+                  request.id
+                )
+            );
+
+          buttons[1]
+            .addEventListener(
+              "click",
+              () =>
+                declineFriend9(
+                  request.id
+                )
+            );
+        } else {
+          row.innerHTML =
+            `📨 Sent to ${esc9(
+              request.username
+            )}`;
+        }
+
+        requests.appendChild(row);
+      }
+    );
+
+    const recent =
+      panel.querySelector(
+        "#m9-recent"
+      );
+
+    recent.innerHTML = "";
+
+    if (!M9.recentPlayers.length) {
+      recent.innerHTML =
+        `<div style="opacity:.6">
+          No recent players.
+        </div>`;
+    }
+
+    M9.recentPlayers
+      .slice(0, 15)
+      .forEach(player => {
+        const row =
+          document.createElement("div");
+
+        row.style.cssText =
+          "display:flex;" +
+          "justify-content:space-between;" +
+          "padding:7px;" +
+          "margin:4px 0;" +
+          "background:rgba(255,255,255,.05);" +
+          "border-radius:9px;";
+
+        row.innerHTML = `
+          <span>
+            ${esc9(player.username)}
+          </span>
+
+          <button>
+            VIEW
+          </button>
+        `;
+
+        row
+          .querySelector("button")
+          .addEventListener(
+            "click",
+            () =>
+              openProfile9(
+                player.username
+              )
+          );
+
+        recent.appendChild(row);
+      });
+
+    const blocked =
+      panel.querySelector(
+        "#m9-blocked"
+      );
+
+    blocked.innerHTML = "";
+
+    if (!M9.blocked.length) {
+      blocked.innerHTML =
+        `<div style="opacity:.6">
+          No blocked players.
+        </div>`;
+    }
+
+    M9.blocked.forEach(
+      username => {
+        const row =
+          document.createElement("div");
+
+        row.style.cssText =
+          "padding:7px;" +
+          "margin:4px 0;" +
+          "background:rgba(255,255,255,.05);" +
+          "border-radius:9px;";
+
+        row.innerHTML = `
+          🚫 ${esc9(username)}
+          <button>
+            UNBLOCK
+          </button>
+        `;
+
+        row
+          .querySelector("button")
+          .addEventListener(
+            "click",
+            () =>
+              toggleBlock9(
+                username
+              )
+          );
+
+        blocked.appendChild(row);
+      }
+    );
+  }
+
+  /* -------------------------------------------------------
+     PARTY PANEL
+     ------------------------------------------------------- */
+
+  function partyPanel9() {
+    let text =
+      "PARTY\n\n";
+
+    if (!M9.party.id) {
+      text +=
+        "You are not in a party.\n\n" +
+        "Create one?";
+
+      if (
+        confirm(text)
+      ) {
+        createParty9();
+      }
+
+      return;
+    }
+
+    text +=
+      "Party ID: " +
+      M9.party.id +
+      "\n\n";
+
+    M9.party.members.forEach(
+      member => {
+        text +=
+          "🐒 " +
+          member.username +
+          (member.leader
+            ? " 👑"
+            : "") +
+          "\n";
+      }
+    );
+
+    text +=
+      "\nLeave party?";
+
+    if (
+      confirm(text)
+    ) {
+      leaveParty9();
+    }
+  }
+
+  /* -------------------------------------------------------
+     EMOTE PANEL
+     ------------------------------------------------------- */
+
+  function emotePanel9() {
+    let menu =
+      document.querySelector(
+        "#m9-emote-panel"
+      );
+
+    if (menu) {
+      menu.remove();
+      return;
+    }
+
+    menu =
+      document.createElement("div");
+
+    menu.id =
+      "m9-emote-panel";
+
+    Object.assign(
+      menu.style,
+      {
+        position: "fixed",
+        left: "50%",
+        bottom: "20px",
+        transform:
+          "translateX(-50%)",
+        background:
+          "rgba(10,10,16,.96)",
+        color: "#fff",
+        padding: "12px",
+        borderRadius: "16px",
+        zIndex: "100000",
+        display: "grid",
+        gridTemplateColumns:
+          "repeat(3,1fr)",
+        gap: "7px",
+        fontFamily:
+          "Arial,sans-serif"
+      }
+    );
+
+    M9.emotes.forEach(
+      emote => {
+        const button =
+          document.createElement(
+            "button"
+          );
+
+        button.textContent =
+          emote.toUpperCase();
+
+        button.addEventListener(
+          "click",
+          () => {
+            playEmote9(emote);
+            menu.remove();
+          }
+        );
+
+        menu.appendChild(
+          button
+        );
+      }
+    );
+
+    document.body.appendChild(
+      menu
+    );
+  }
+
+  /* -------------------------------------------------------
+     NOTIFICATIONS PANEL
+     ------------------------------------------------------- */
+
+  function notificationPanel9() {
+    let panel =
+      document.querySelector(
+        "#m9-notification-panel"
+      );
+
+    if (panel) {
+      panel.remove();
+      return;
+    }
+
+    panel =
+      document.createElement("div");
+
+    panel.id =
+      "m9-notification-panel";
+
+    Object.assign(
+      panel.style,
+      {
+        position: "fixed",
+        right: "15px",
+        top: "15px",
+        width:
+          "min(380px,calc(100vw - 30px))",
+        maxHeight:
+          "70vh",
+        overflow:
+          "auto",
+        background:
+          "rgba(10,10,16,.97)",
+        color: "#fff",
+        padding: "15px",
+        borderRadius: "17px",
+        zIndex: "100000",
+        fontFamily:
+          "Arial,sans-serif"
+      }
+    );
+
+    panel.innerHTML = `
+      <div style="
+        display:flex;
+        justify-content:space-between;
+      ">
+        <strong>
+          🔔 NOTIFICATIONS
+        </strong>
+
+        <button id="m9-notif-close">
+          ✕
+        </button>
+      </div>
+
+      <div id="m9-notif-list"
+        style="margin-top:10px">
+      </div>
+
+      <div style="margin-top:10px">
+        <button id="m9-read">
+          MARK READ
+        </button>
+
+        <button id="m9-clear">
+          CLEAR
+        </button>
+      </div>
+    `;
+
+    document.body.appendChild(
+      panel
+    );
+
+    panel
+      .querySelector(
+        "#m9-notif-close"
+      )
+      .addEventListener(
+        "click",
+        () => panel.remove()
+      );
+
+    panel
+      .querySelector("#m9-read")
+      .addEventListener(
+        "click",
+        markNotificationsRead9
+      );
+
+    panel
+      .querySelector("#m9-clear")
+      .addEventListener(
+        "click",
+        clearNotifications9
+      );
+
+    const list =
+      panel.querySelector(
+        "#m9-notif-list"
+      );
+
+    if (!M9.notifications.length) {
+      list.innerHTML =
+        `<div style="opacity:.6">
+          Nothing here.
+        </div>`;
+    }
+
+    M9.notifications
+      .slice(0, 30)
+      .forEach(
+        notification => {
+          const row =
+            document.createElement("div");
+
+          row.style.cssText =
+            "padding:9px;" +
+            "margin:5px 0;" +
+            "border-radius:10px;" +
+            "background:" +
+            (
+              notification.read
+                ? "rgba(255,255,255,.04)"
+                : "rgba(255,255,255,.10)"
+            );
+
+          row.innerHTML = `
+            <b>
+              ${esc9(
+                notification.title
+              )}
+            </b>
+
+            <div style="
+              opacity:.75;
+              margin-top:3px;
+            ">
+              ${esc9(
+                notification.message
+              )}
+            </div>
+          `;
+
+          list.appendChild(row);
+        }
+      );
+  }
+
+  /* -------------------------------------------------------
+     ONLINE PACKET HANDLER
+     ------------------------------------------------------- */
+
+  function handlePacket9(packet) {
+    if (!packet?.type) return;
+
+    switch (packet.type) {
+      case "friend_request":
+        receiveFriendRequest9(
+          packet.username
+        );
+        break;
+
+      case "friend_accept":
+        addNotification9(
+          "Friend added",
+          packet.username +
+            " accepted your request.",
+          "friend"
+        );
+        break;
+
+      case "party_invite":
+        addNotification9(
+          "Party invite",
+          packet.username +
+            " invited you to a party.",
+          "party"
+        );
+        break;
+
+      case "party_join":
+        joinParty9(packet);
+        break;
+
+      case "notification":
+        addNotification9(
+          packet.title,
+          packet.message,
+          packet.notificationType
+        );
+        break;
+
+      case "player_seen":
+        addRecentPlayer9(
+          packet.player
+        );
+        break;
+
+      case "emote":
+        if (
+          packet.username &&
+          packet.emote
+        ) {
+          showEmoteVisual9(
+            packet.emote
+          );
+        }
+        break;
+    }
+  }
+
+  /* -------------------------------------------------------
+     CONNECT TO EXISTING ONLINE SYSTEM
+     ------------------------------------------------------- */
+
+  function hookOnline9() {
+    const online =
+      window.MonkeyVROnline;
+
+    if (
+      !online ||
+      online._m9Hooked
+    ) {
+      return;
+    }
+
+    online._m9Hooked = true;
+
+    const oldHandler =
+      online.handlePacket;
+
+    if (
+      typeof oldHandler ===
+      "function"
+    ) {
+      online.handlePacket =
+        function (packet) {
+          oldHandler.call(
+            this,
+            packet
+          );
+
+          handlePacket9(packet);
+        };
+    }
+  }
+
+  /* -------------------------------------------------------
+     SETTINGS
+     ------------------------------------------------------- */
+
+  function socialSettings9() {
+    M9.settings.showNames =
+      confirm(
+        "Show player names?"
+      );
+
+    M9.settings.showStatus =
+      confirm(
+        "Show online status?"
+      );
+
+    M9.settings.proximityChat =
+      confirm(
+        "Enable proximity voice foundation?"
+      );
+
+    save9();
+
+    notify9(
+      "Social settings saved"
+    );
+  }
+
+  /* -------------------------------------------------------
+     KEYBOARD SHORTCUTS
+     ------------------------------------------------------- */
+
+  window.addEventListener(
+    "keydown",
+    event => {
+      if (
+        event.target &&
+        (
+          event.target.tagName ===
+            "INPUT" ||
+          event.target.tagName ===
+            "TEXTAREA" ||
+          event.target.tagName ===
+            "SELECT"
+        )
+      ) {
+        return;
+      }
+
+      if (
+        event.key.toLowerCase() ===
+        "u"
+      ) {
+        openSocial9();
+      }
+
+      if (
+        event.key.toLowerCase() ===
+        "e"
+      ) {
+        emotePanel9();
+      }
+
+      if (
+        event.key.toLowerCase() ===
+        "n"
+      ) {
+        notificationPanel9();
+      }
+    }
+  );
+
+  /* -------------------------------------------------------
+     PUBLIC API
+     ------------------------------------------------------- */
+
+  window.MonkeyVRSocial = {
+    state: M9,
+
+    open:
+      openSocial9,
+
+    close:
+      closeSocial9,
+
+    profile:
+      openProfile9,
+
+    editProfile:
+      editProfile9,
+
+    addFriend:
+      sendFriendRequest9,
+
+    acceptFriend:
+      acceptFriend9,
+
+    declineFriend:
+      declineFriend9,
+
+    removeFriend:
+      removeFriend9,
+
+    block:
+      toggleBlock9,
+
+    mute:
+      toggleMute9,
+
+    report:
+      reportPlayer9,
+
+    party:
+      createParty9,
+
+    leaveParty:
+      leaveParty9,
+
+    invite:
+      invitePlayer9,
+
+    emote:
+      playEmote9,
+
+    notifications:
+      addNotification9,
+
+    settings:
+      socialSettings9,
+
+    handlePacket:
+      handlePacket9
+  };
+
+  /* -------------------------------------------------------
+     INIT
+     ------------------------------------------------------- */
+
+  function init9() {
+    load9();
+
+    hookOnline9();
+
+    setTimeout(
+      hookOnline9,
+      1500
+    );
+
+    setTimeout(
+      hookOnline9,
+      4000
+    );
+
+    console.log(
+      "Monkey VR Social 2.0 loaded"
+    );
+  }
+
+  if (
+    document.readyState ===
+    "loading"
+  ) {
+    document.addEventListener(
+      "DOMContentLoaded",
+      init9,
+      { once: true }
+    );
+  } else {
+    init9();
+  }
+
+})(); 
+      /* =========================================================
+   MONKEY VR — PART 10
+   FINAL POLISH + INTEGRATION
+   ========================================================= */
+
+(function () {
+  "use strict";
+
+  const M10 = {
+    version: "10.0",
+    booted: false,
+    loading: true,
+    menuOpen: false,
+    activePage: "HOME",
+    fps: 60,
+    frameTimes: [],
+    performanceMode: "auto",
+    quality: "high",
+    notifications: true,
+    reducedMotion: false,
+    debug: false,
+    session: {
+      started: Date.now(),
+      rounds: 0,
+      tags: 0,
+      jumps: 0,
+      objectsBuilt: 0
+    }
+  };
+
+  /* -------------------------------------------------------
+     HELPERS
+  ------------------------------------------------------- */
+
+  function esc10(value) {
+    return String(value ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function clamp10(v, min, max) {
+    return Math.max(min, Math.min(max, v));
+  }
+
+  function notify10(message) {
+    if (!M10.notifications) return;
+
+    if (
+      window.MonkeyVRSocial &&
+      typeof window.MonkeyVRSocial.notifications ===
+        "function"
+    ) {
+      window.MonkeyVRSocial.notifications(
+        "Monkey VR",
+        message,
+        "system"
+      );
+      return;
+    }
+
+    let el =
+      document.querySelector(
+        "#m10-toast"
+      );
+
+    if (!el) {
+      el =
+        document.createElement("div");
+
+      el.id =
+        "m10-toast";
+
+      Object.assign(
+        el.style,
+        {
+          position: "fixed",
+          left: "50%",
+          bottom: "28px",
+          transform:
+            "translateX(-50%)",
+          background:
+            "rgba(8,8,12,.94)",
+          color: "#fff",
+          padding:
+            "11px 18px",
+          borderRadius:
+            "14px",
+          zIndex:
+            "100000",
+          fontFamily:
+            "Arial,sans-serif",
+          fontSize:
+            "14px",
+          pointerEvents:
+            "none",
+          opacity: "0",
+          transition:
+            "opacity .2s"
+        }
+      );
+
+      document.body.appendChild(
+        el
+      );
+    }
+
+    el.textContent =
+      message;
+
+    el.style.opacity =
+      "1";
+
+    clearTimeout(
+      el._timer
+    );
+
+    el._timer =
+      setTimeout(
+        () => {
+          el.style.opacity =
+            "0";
+        },
+        1700
+      );
+  }
+
+  /* -------------------------------------------------------
+     PERFORMANCE MONITOR
+  ------------------------------------------------------- */
+
+  let lastFrame10 =
+    performance.now();
+
+  function updatePerformance10(now) {
+    const delta =
+      now - lastFrame10;
+
+    lastFrame10 =
+      now;
+
+    if (
+      delta > 0 &&
+      delta < 1000
+    ) {
+      const fps =
+        1000 / delta;
+
+      M10.frameTimes.push(
+        fps
+      );
+
+      if (
+        M10.frameTimes.length >
+        30
+      ) {
+        M10.frameTimes.shift();
+      }
+
+      const total =
+        M10.frameTimes.reduce(
+          (a, b) => a + b,
+          0
+        );
+
+      M10.fps =
+        total /
+        M10.frameTimes.length;
+    }
+  }
+
+  function applyPerformance10() {
+    const scene =
+      document.querySelector(
+        "a-scene"
+      );
+
+    if (!scene) return;
+
+    let quality =
+      M10.quality;
+
+    if (
+      M10.performanceMode ===
+      "auto"
+    ) {
+      if (M10.fps < 45) {
+        quality = "low";
+      } else if (
+        M10.fps < 55
+      ) {
+        quality = "medium";
+      } else {
+        quality = "high";
+      }
+    }
+
+    const settings = {
+      low: {
+        shadows: false,
+        particles: false,
+        far: 30
+      },
+
+      medium: {
+        shadows: false,
+        particles: true,
+        far: 55
+      },
+
+      high: {
+        shadows: true,
+        particles: true,
+        far: 90
+      }
+    };
+
+    const current =
+      settings[
+        quality
+      ] ||
+      settings.medium;
+
+    scene.setAttribute(
+      "fog",
+      `type:linear;near:8;far:${current.far};color:#20252a`
+    );
+
+    const renderer =
+      scene.renderer;
+
+    if (renderer) {
+      renderer.shadowMap.enabled =
+        current.shadows;
+    }
+  }
+
+  /* -------------------------------------------------------
+     FINAL MENU
+  ------------------------------------------------------- */
+
+  function createFinalMenu10() {
+    if (
+      document.querySelector(
+        "#m10-final-menu"
+      )
+    ) {
+      return;
+    }
+
+    const menu =
+      document.createElement("div");
+
+    menu.id =
+      "m10-final-menu";
+
+    Object.assign(
+      menu.style,
+      {
+        position: "fixed",
+        inset: "0",
+        background:
+          "rgba(0,0,0,.76)",
+        zIndex:
+          "99990",
+        display: "none",
+        alignItems:
+          "center",
+        justifyContent:
+          "center",
+        fontFamily:
+          "Arial,sans-serif",
+        color:
+          "#fff",
+        padding:
+          "15px",
+        boxSizing:
+          "border-box"
+      }
+    );
+
+    menu.innerHTML = `
+      <div style="
+        width:min(760px,100%);
+        max-height:90vh;
+        overflow:auto;
+        background:
+          rgba(12,12,18,.97);
+        border:
+          1px solid rgba(255,255,255,.15);
+        border-radius:22px;
+        padding:18px;
+        box-sizing:border-box;
+      ">
+
+        <div style="
+          display:flex;
+          justify-content:space-between;
+          align-items:center;
+          gap:10px;
+        ">
+          <div>
+            <div style="
+              font-size:25px;
+              font-weight:800;
+            ">
+              🐒 MONKEY VR
+            </div>
+
+            <div style="
+              opacity:.6;
+              font-size:12px;
+            ">
+              Client v10.0
+            </div>
+          </div>
+
+          <button id="m10-close">
+            ✕
+          </button>
+        </div>
+
+        <div style="
+          display:grid;
+          grid-template-columns:
+            repeat(3,1fr);
+          gap:8px;
+          margin-top:16px;
+        ">
+          <button data-page="HOME">
+            🏠 HOME
+          </button>
+
+          <button data-page="PLAY">
+            🎮 PLAY
+          </button>
+
+          <button data-page="SOCIAL">
+            👥 SOCIAL
+          </button>
+
+          <button data-page="CREATOR">
+            🛠️ CREATOR
+          </button>
+
+          <button data-page="POWERS">
+            ⚡ POWERS
+          </button>
+
+          <button data-page="PROFILE">
+            👤 PROFILE
+          </button>
+
+          <button data-page="ACHIEVEMENTS">
+            🏆 ACHIEVEMENTS
+          </button>
+
+          <button data-page="INVENTORY">
+            👕 INVENTORY
+          </button>
+
+          <button data-page="SETTINGS">
+            ⚙️ SETTINGS
+          </button>
+        </div>
+
+        <div
+          id="m10-content"
+          style="
+            margin-top:16px;
+          "
+        ></div>
+
+      </div>
+    `;
+
+    document.body.appendChild(
+      menu
+    );
+
+    menu
+      .querySelector(
+        "#m10-close"
+      )
+      .addEventListener(
+        "click",
+        closeFinalMenu10
+      );
+
+    menu
+      .querySelectorAll(
+        "[data-page]"
+      )
+      .forEach(
+        button => {
+          button.addEventListener(
+            "click",
+            () => {
+              M10.activePage =
+                button.dataset.page;
+
+              renderFinalPage10();
+            }
+          );
+        }
+      );
+
+    renderFinalPage10();
+  }
+
+  function openFinalMenu10() {
+    createFinalMenu10();
+
+    const menu =
+      document.querySelector(
+        "#m10-final-menu"
+      );
+
+    if (!menu) return;
+
+    menu.style.display =
+      "flex";
+
+    M10.menuOpen =
+      true;
+
+    renderFinalPage10();
+  }
+
+  function closeFinalMenu10() {
+    const menu =
+      document.querySelector(
+        "#m10-final-menu"
+      );
+
+    if (menu) {
+      menu.style.display =
+        "none";
+    }
+
+    M10.menuOpen =
+      false;
+  }
+
+  /* -------------------------------------------------------
+     PAGE RENDERER
+  ------------------------------------------------------- */
+
+  function renderFinalPage10() {
+    const content =
+      document.querySelector(
+        "#m10-content"
+      );
+
+    if (!content) return;
+
+    switch (
+      M10.activePage
+    ) {
+      case "HOME":
+        renderHome10(content);
+        break;
+
+      case "PLAY":
+        renderPlay10(content);
+        break;
+
+      case "SOCIAL":
+        renderSocial10(content);
+        break;
+
+      case "CREATOR":
+        renderCreator10(content);
+        break;
+
+      case "POWERS":
+        renderPowers10(content);
+        break;
+
+      case "PROFILE":
+        renderProfile10(content);
+        break;
+
+      case "ACHIEVEMENTS":
+        renderAchievements10(
+          content
+        );
+        break;
+
+      case "INVENTORY":
+        renderInventory10(content);
+        break;
+
+      case "SETTINGS":
+        renderSettings10(content);
+        break;
+
+      default:
+        renderHome10(content);
+    }
+  }
+
+  /* -------------------------------------------------------
+     HOME
+  ------------------------------------------------------- */
+
+  function renderHome10(el) {
+    const online =
+      window.MonkeyVROnline;
+
+    const social =
+      window.MonkeyVRSocial;
+
+    const creator =
+      window.MonkeyVRCreator;
+
+    el.innerHTML = `
+      <div style="
+        padding:18px;
+        border-radius:18px;
+        background:
+          rgba(255,255,255,.06);
+      ">
+        <h2>
+          Welcome to Monkey VR 🐒
+        </h2>
+
+        <p style="opacity:.7">
+          A standalone VR/mobile/PC
+          monkey movement sandbox.
+        </p>
+
+        <div style="
+          display:grid;
+          grid-template-columns:
+            repeat(2,1fr);
+          gap:8px;
+          margin-top:12px;
+        ">
+          <button id="m10-quick-play">
+            ▶️ QUICK PLAY
+          </button>
+
+          <button id="m10-room">
+            🌐 ROOMS
+          </button>
+
+          <button id="m10-social">
+            👥 SOCIAL
+          </button>
+
+          <button id="m10-build">
+            🛠️ BUILD
+          </button>
+        </div>
+      </div>
+
+      <div style="
+        margin-top:12px;
+        display:grid;
+        grid-template-columns:
+          repeat(3,1fr);
+        gap:8px;
+      ">
+        <div class="m10-stat">
+          FPS<br>
+          <b>${Math.round(
+            M10.fps
+          )}</b>
+        </div>
+
+        <div class="m10-stat">
+          Session<br>
+          <b>${formatTime10(
+            Date.now() -
+            M10.session.started
+          )}</b>
+        </div>
+
+        <div class="m10-stat">
+          Built<br>
+          <b>${M10.session.objectsBuilt}</b>
+        </div>
+      </div>
+    `;
+
+    el
+      .querySelector(
+        "#m10-quick-play"
+      )
+      .addEventListener(
+        "click",
+        quickPlay10
+      );
+
+    el
+      .querySelector(
+        "#m10-room"
+      )
+      .addEventListener(
+        "click",
+        () => {
+          if (
+            online &&
+            typeof online.openPanel ===
+              "function"
+          ) {
+            online.openPanel();
+          } else {
+            notify10(
+              "Online room foundation ready"
+            );
+          }
+        }
+      );
+
+    el
+      .querySelector(
+        "#m10-social"
+      )
+      .addEventListener(
+        "click",
+        () => {
+          if (
+            social &&
+            typeof social.open ===
+              "function"
+          ) {
+            closeFinalMenu10();
+            social.open();
+          }
+        }
+      );
+
+    el
+      .querySelector(
+        "#m10-build"
+      )
+      .addEventListener(
+        "click",
+        () => {
+          if (
+            creator &&
+            typeof creator.open ===
+              "function"
+          ) {
+            closeFinalMenu10();
+            creator.open();
+          }
+        }
+      );
+  }
+
+  /* -------------------------------------------------------
+     PLAY
+  ------------------------------------------------------- */
+
+  function renderPlay10(el) {
+    el.innerHTML = `
+      <h2>🎮 PLAY</h2>
+
+      <div style="
+        display:grid;
+        grid-template-columns:
+          repeat(2,1fr);
+        gap:8px;
+      ">
+        <button data-mode="Tag">
+          🏷️ TAG
+        </button>
+
+        <button data-mode="Infection">
+          🦠 INFECTION
+        </button>
+
+        <button data-mode="Hide & Seek">
+          👀 HIDE & SEEK
+        </button>
+
+        <button data-mode="Race">
+          🏁 RACE
+        </button>
+
+        <button data-mode="Survival">
+          💀 SURVIVAL
+        </button>
+
+        <button data-mode="Parkour">
+          🧗 PARKOUR
+        </button>
+
+        <button data-mode="Custom">
+          ⚙️ CUSTOM
+        </button>
+
+        <button data-mode="Hangout">
+          🐒 HANGOUT
+        </button>
+      </div>
+    `;
+
+    el
+      .querySelectorAll(
+        "[data-mode]"
+      )
+      .forEach(
+        button => {
+          button.addEventListener(
+            "click",
+            () => {
+              const mode =
+                button.dataset.mode;
+
+              if (
+                window.MonkeyVR &&
+                typeof window.MonkeyVR.setGameMode ===
+                  "function"
+              ) {
+                window.MonkeyVR
+                  .setGameMode(
+                    mode
+                  );
+              }
+
+              notify10(
+                mode +
+                " selected"
+              );
+            }
+          );
+        }
+      );
+  }
+
+  /* -------------------------------------------------------
+     SOCIAL
+  ------------------------------------------------------- */
+
+  function renderSocial10(el) {
+    el.innerHTML = `
+      <h2>👥 SOCIAL</h2>
+
+      <button id="m10-open-social">
+        OPEN SOCIAL PANEL
+      </button>
+
+      <button id="m10-party">
+        CREATE PARTY
+      </button>
+
+      <button id="m10-emotes">
+        EMOTES
+      </button>
+
+      <button id="m10-notifications">
+        NOTIFICATIONS
+      </button>
+    `;
+
+    el
+      .querySelector(
+        "#m10-open-social"
+      )
+      .addEventListener(
+        "click",
+        () => {
+          closeFinalMenu10();
+
+          if (
+            window.MonkeyVRSocial
+          ) {
+            window.MonkeyVRSocial
+              .open();
+          }
+        }
+      );
+
+    el
+      .querySelector(
+        "#m10-party"
+      )
+      .addEventListener(
+        "click",
+        () => {
+          if (
+            window.MonkeyVRSocial
+          ) {
+            window.MonkeyVRSocial
+              .party();
+          }
+        }
+      );
+
+    el
+      .querySelector(
+        "#m10-emotes"
+      )
+      .addEventListener(
+        "click",
+        () => {
+          if (
+            window.MonkeyVRSocial
+          ) {
+            window.MonkeyVRSocial
+              .emote("wave");
+          }
+        }
+      );
+
+    el
+      .querySelector(
+        "#m10-notifications"
+      )
+      .addEventListener(
+        "click",
+        () => {
+          if (
+            window.MonkeyVRSocial
+          ) {
+            window.MonkeyVRSocial
+              .notifications(
+                "Monkey VR",
+                "No new alerts.",
+                "system"
+              );
+          }
+        }
+      );
+  }
+
+  /* -------------------------------------------------------
+     CREATOR
+  ------------------------------------------------------- */
+
+  function renderCreator10(el) {
+    el.innerHTML = `
+      <h2>🛠️ CREATOR</h2>
+
+      <p style="opacity:.7">
+        Build maps, logic, obstacles,
+        moving platforms and custom
+        experiences.
+      </p>
+
+      <button id="m10-open-builder">
+        OPEN CREATOR
+      </button>
+
+      <button id="m10-map-browser">
+        COMMUNITY MAPS
+      </button>
+
+      <button id="m10-new-map">
+        NEW MAP
+      </button>
+    `;
+
+    el
+      .querySelector(
+        "#m10-open-builder"
+      )
+      .addEventListener(
+        "click",
+        () => {
+          closeFinalMenu10();
+
+          if (
+            window.MonkeyVRCreator
+          ) {
+            window.MonkeyVRCreator
+              .open();
+          }
+        }
+      );
+
+    el
+      .querySelector(
+        "#m10-map-browser"
+      )
+      .addEventListener(
+        "click",
+        () => {
+          if (
+            window.MonkeyVRCreator
+          ) {
+            window.MonkeyVRCreator
+              .browser();
+          }
+        }
+      );
+
+    el
+      .querySelector(
+        "#m10-new-map"
+      )
+      .addEventListener(
+        "click",
+        () => {
+          if (
+            window.MonkeyVRCreator
+          ) {
+            window.MonkeyVRCreator
+              .clear();
+          }
+        }
+      );
+  }
+
+  /* -------------------------------------------------------
+     POWERS
+  ------------------------------------------------------- */
+
+  function renderPowers10(el) {
+    const powers = [
+      "superJump",
+      "speedBurst",
+      "moonJump",
+      "shockwave",
+      "giant",
+      "tiny",
+      "blink",
+      "random"
+    ];
+
+    el.innerHTML = `
+      <h2>⚡ POWER LAB</h2>
+
+      <p style="opacity:.7">
+        Experimental sandbox powers.
+      </p>
+
+      <div id="m10-power-grid"
+        style="
+          display:grid;
+          grid-template-columns:
+            repeat(2,1fr);
+          gap:8px;
+        ">
+      </div>
+    `;
+
+    const grid =
+      el.querySelector(
+        "#m10-power-grid"
+      );
+
+    powers.forEach(
+      power => {
+        const button =
+          document.createElement(
+            "button"
+          );
+
+        button.textContent =
+          power
+            .replace(
+              /([A-Z])/g,
+              " $1"
+            )
+            .toUpperCase();
+
+        button.addEventListener(
+          "click",
+          () => {
+            if (
+              window.MonkeyVR &&
+              typeof window.MonkeyVR.activatePower ===
+                "function"
+            ) {
+              window.MonkeyVR
+                .activatePower(
+                  power
+                );
+            } else {
+              notify10(
+                power +
+                " foundation activated"
+              );
+            }
+          }
+        );
+
+        grid.appendChild(
+          button
+        );
+      }
+    );
+  }
+
+  /* -------------------------------------------------------
+     PROFILE
+  ------------------------------------------------------- */
+
+  function renderProfile10(el) {
+    const profile =
+      window.MonkeyVRSocial?.state
+        ?.profile || {};
+
+    el.innerHTML = `
+      <h2>👤 PROFILE</h2>
+
+      <div style="
+        padding:15px;
+        border-radius:15px;
+        background:
+          rgba(255,255,255,.06);
+      ">
+        <div style="font-size:22px">
+          🐒 ${esc10(
+            profile.displayName ||
+            profile.username ||
+            "Player"
+          )}
+        </div>
+
+        <div style="opacity:.7">
+          ${esc10(
+            profile.title ||
+            "New Monkey"
+          )}
+        </div>
+
+        <div style="margin-top:8px">
+          Level:
+          ${Number(
+            profile.level || 1
+          )}
+        </div>
+
+        <div>
+          XP:
+          ${Number(
+            profile.xp || 0
+          )}
+        </div>
+
+        <div>
+          Coins:
+          ${Number(
+            profile.coins || 0
+          )}
+        </div>
+
+        <p style="opacity:.7">
+          ${esc10(
+            profile.bio ||
+            "No bio yet."
+          )}
+        </p>
+      </div>
+
+      <button id="m10-edit-profile">
+        EDIT PROFILE
+      </button>
+    `;
+
+    el
+      .querySelector(
+        "#m10-edit-profile"
+      )
+      .addEventListener(
+        "click",
+        () => {
+          if (
+            window.MonkeyVRSocial
+          ) {
+            window.MonkeyVRSocial
+              .editProfile();
+
+            setTimeout(
+              renderFinalPage10,
+              50
+            );
+          }
+        }
+      );
+  }
+
+  /* -------------------------------------------------------
+     ACHIEVEMENTS
+  ------------------------------------------------------- */
+
+  function renderAchievements10(el) {
+    const achievements =
+      window.MonkeyVR?.achievements ||
+      window.Game?.achievements ||
+      {};
+
+    const names = [
+      "First Steps",
+      "Explorer",
+      "Builder",
+      "Collector",
+      "Secret Seeker",
+      "Speed Demon",
+      "Parkour Master",
+      "Tag Master",
+      "Chaos Master",
+      "World Traveler",
+      "Power Lab",
+      "Creator",
+      "Marathon"
+    ];
+
+    el.innerHTML = `
+      <h2>🏆 ACHIEVEMENTS</h2>
+
+      <div id="m10-achievements"
+        style="
+          display:grid;
+          gap:7px;
+        ">
+      </div>
+    `;
+
+    const grid =
+      el.querySelector(
+        "#m10-achievements"
+      );
+
+    names.forEach(
+      name => {
+        const unlocked =
+          achievements[name] ||
+          achievements[
+            name.toLowerCase()
+          ];
+
+        const row =
+          document.createElement(
+            "div"
+          );
+
+        row.style.cssText =
+          "padding:10px;" +
+          "border-radius:10px;" +
+          "background:" +
+          (
+            unlocked
+              ? "rgba(255,255,255,.12)"
+              : "rgba(255,255,255,.04)"
+          );
+
+        row.innerHTML =
+          (
+            unlocked
+              ? "🏆"
+              : "🔒"
+          ) +
+          " " +
+          esc10(name);
+
+        grid.appendChild(
+          row
+        );
+      }
+    );
+  }
+
+  /* -------------------------------------------------------
+     INVENTORY
+  ------------------------------------------------------- */
+
+  function renderInventory10(el) {
+    const inventory =
+      window.Game?.player?.inventory ||
+      window.MonkeyVR?.inventory ||
+      [];
+
+    el.innerHTML = `
+      <h2>👕 INVENTORY</h2>
+
+      <p style="opacity:.7">
+        Cosmetics and collected items.
+      </p>
+
+      <div id="m10-inventory"
+        style="
+          display:grid;
+          grid-template-columns:
+            repeat(2,1fr);
+          gap:8px;
+        ">
+      </div>
+    `;
+
+    const grid =
+      el.querySelector(
+        "#m10-inventory"
+      );
+
+    const items =
+      Array.isArray(inventory)
+        ? inventory
+        : Object.keys(
+            inventory
+          );
+
+    if (!items.length) {
+      grid.innerHTML =
+        `<div style="opacity:.6">
+          No items found yet.
+        </div>`;
+      return;
+    }
+
+    items
+      .slice(0, 40)
+      .forEach(
+        item => {
+          const button =
+            document.createElement(
+              "button"
+            );
+
+          button.textContent =
+            typeof item ===
+            "string"
+              ? item
+              : (
+                item.name ||
+                "Item"
+              );
+
+          button.addEventListener(
+            "click",
+            () => {
+              notify10(
+                "Selected " +
+                button.textContent
+              );
+            }
+          );
+
+          grid.appendChild(
+            button
+          );
+        }
+      );
+  }
+
+  /* -------------------------------------------------------
+     SETTINGS
+  ------------------------------------------------------- */
+
+  function renderSettings10(el) {
+    el.innerHTML = `
+      <h2>⚙️ SETTINGS</h2>
+
+      <label style="
+        display:block;
+        margin:9px 0;
+      ">
+        Performance
+        <select id="m10-performance">
+          <option value="auto">
+            Auto
+          </option>
+          <option value="low">
+            Low
+          </option>
+          <option value="medium">
+            Medium
+          </option>
+          <option value="high">
+            High
+          </option>
+        </select>
+      </label>
+
+      <label style="
+        display:block;
+        margin:9px 0;
+      ">
+        Quality
+        <select id="m10-quality">
+          <option value="low">
+            Low
+          </option>
+          <option value="medium">
+            Medium
+          </option>
+          <option value="high">
+            High
+          </option>
+        </select>
+      </label>
+
+      <label style="
+        display:block;
+        margin:9px 0;
+      ">
+        <input
+          type="checkbox"
+          id="m10-notifications-setting"
+          checked
+        >
+        Notifications
+      </label>
+
+      <label style="
+        display:block;
+        margin:9px 0;
+      ">
+        <input
+          type="checkbox"
+          id="m10-debug"
+        >
+        Debug information
+      </label>
+
+      <button id="m10-save-settings">
+        SAVE SETTINGS
+      </button>
+
+      <button id="m10-reset-settings">
+        RESET SETTINGS
+      </button>
+
+      <div id="m10-performance-info"
+        style="
+          margin-top:12px;
+          padding:10px;
+          border-radius:10px;
+          background:
+            rgba(255,255,255,.06);
+        ">
+      </div>
+    `;
+
+    const performance =
+      el.querySelector(
+        "#m10-performance"
+      );
+
+    const quality =
+      el.querySelector(
+        "#m10-quality"
+      );
+
+    performance.value =
+      M10.performanceMode;
+
+    quality.value =
+      M10.quality;
+
+    el
+      .querySelector(
+        "#m10-notifications-setting"
+      )
+      .checked =
+      M10.notifications;
+
+    el
+      .querySelector(
+        "#m10-debug"
+      )
+      .checked =
+      M10.debug;
+
+    performance.addEventListener(
+      "change",
+      e => {
+        M10.performanceMode =
+          e.target.value;
+
+        applyPerformance10();
+      }
+    );
+
+    quality.addEventListener(
+      "change",
+      e => {
+        M10.quality =
+          e.target.value;
+
+        applyPerformance10();
+      }
+    );
+
+    el
+      .querySelector(
+        "#m10-save-settings"
+      )
+      .addEventListener(
+        "click",
+        () => {
+          M10.notifications =
+            el.querySelector(
+              "#m10-notifications-setting"
+            ).checked;
+
+          M10.debug =
+            el.querySelector(
+              "#m10-debug"
+            ).checked;
+
+          saveFinalSettings10();
+
+          notify10(
+            "Settings saved"
+          );
+        }
+      );
+
+    el
+      .querySelector(
+        "#m10-reset-settings"
+      )
+      .addEventListener(
+        "click",
+        () => {
+          M10.performanceMode =
+            "auto";
+
+          M10.quality =
+            "high";
+
+          M10.notifications =
+            true;
+
+          M10.debug =
+            false;
+
+          saveFinalSettings10();
+
+          renderFinalPage10();
+
+          notify10(
+            "Settings reset"
+          );
+        }
+      );
+
+    updatePerformanceInfo10();
+  }
+
+  function updatePerformanceInfo10() {
+    const el =
+      document.querySelector(
+        "#m10-performance-info"
+      );
+
+    if (!el) return;
+
+    el.innerHTML = `
+      FPS:
+      <b>${Math.round(
+        M10.fps
+      )}</b><br>
+      Quality:
+      ${esc10(
+        M10.quality
+      )}<br>
+      Mode:
+      ${esc10(
+        M10.performanceMode
+      )}
+    `;
+  }
+
+  /* -------------------------------------------------------
+     SETTINGS SAVE
+  ------------------------------------------------------- */
+
+  function saveFinalSettings10() {
+    try {
+      localStorage.setItem(
+        "MonkeyVR_FinalSettings",
+        JSON.stringify({
+          performanceMode:
+            M10.performanceMode,
+          quality:
+            M10.quality,
+          notifications:
+            M10.notifications,
+          debug:
+            M10.debug
+        })
+      );
+    } catch (e) {
+      console.warn(
+        "Settings save failed",
+        e
+      );
+    }
+  }
+
+  function loadFinalSettings10() {
+    try {
+      const raw =
+        localStorage.getItem(
+          "MonkeyVR_FinalSettings"
+        );
+
+      if (!raw) return;
+
+      const data =
+        JSON.parse(raw);
+
+      M10.performanceMode =
+        data.performanceMode ||
+        "auto";
+
+      M10.quality =
+        data.quality ||
+        "high";
+
+      if (
+        typeof data.notifications ===
+        "boolean"
+      ) {
+        M10.notifications =
+          data.notifications;
+      }
+
+      if (
+        typeof data.debug ===
+        "boolean"
+      ) {
+        M10.debug =
+          data.debug;
+      }
+    } catch (e) {
+      console.warn(
+        "Settings load failed",
+        e
+      );
+    }
+  }
+
+  /* -------------------------------------------------------
+     QUICK PLAY
+  ------------------------------------------------------- */
+
+  function quickPlay10() {
+    const modes = [
+      "Tag",
+      "Infection",
+      "Parkour",
+      "Race",
+      "Hangout"
+    ];
+
+    const mode =
+      modes[
+        Math.floor(
+          Math.random() *
+          modes.length
+        )
+      ];
+
+    if (
+      window.MonkeyVR &&
+      typeof window.MonkeyVR.setGameMode ===
+        "function"
+    ) {
+      window.MonkeyVR
+        .setGameMode(
+          mode
+        );
+    }
+
+    notify10(
+      "Quick Play: " +
+      mode
+    );
+
+    closeFinalMenu10();
+  }
+
+  /* -------------------------------------------------------
+     SAVE EVERYTHING
+  ------------------------------------------------------- */
+
+  function finalSave10() {
+    try {
+      if (
+        window.MonkeyVRCreator &&
+        window.MonkeyVRCreator.state
+      ) {
+        localStorage.setItem(
+          "MonkeyVR_FinalCreatorBackup",
+          JSON.stringify(
+            window.MonkeyVRCreator.state
+          )
+        );
+      }
+
+      if (
+        window.MonkeyVRSocial &&
+        window.MonkeyVRSocial.state
+      ) {
+        localStorage.setItem(
+          "MonkeyVR_FinalSocialBackup",
+          JSON.stringify(
+            window.MonkeyVRSocial.state
+          )
+        );
+      }
+
+      saveFinalSettings10();
+    } catch (e) {
+      console.warn(
+        "Final backup failed",
+        e
+      );
+    }
+  }
+
+  /* -------------------------------------------------------
+     ERROR GUARD
+  ------------------------------------------------------- */
+
+  window.addEventListener(
+    "error",
+    event => {
+      if (!M10.debug) return;
+
+      console.warn(
+        "Monkey VR error:",
+        event.error ||
+        event.message
+      );
+    }
+  );
+
+  window.addEventListener(
+    "unhandledrejection",
+    event => {
+      if (!M10.debug) return;
+
+      console.warn(
+        "Monkey VR promise error:",
+        event.reason
+      );
+    }
+  );
+
+  /* -------------------------------------------------------
+     KEYBOARD
+  ------------------------------------------------------- */
+
+  window.addEventListener(
+    "keydown",
+    event => {
+      if (
+        event.target &&
+        (
+          event.target.tagName ===
+            "INPUT" ||
+          event.target.tagName ===
+            "TEXTAREA" ||
+          event.target.tagName ===
+            "SELECT"
+        )
+      ) {
+        return;
+      }
+
+      if (
+        event.key === "Escape" &&
+        M10.menuOpen
+      ) {
+        closeFinalMenu10();
+      }
+
+      if (
+        event.key.toLowerCase() ===
+        "m"
+      ) {
+        if (
+          M10.menuOpen
+        ) {
+          closeFinalMenu10();
+        } else {
+          openFinalMenu10();
+        }
+      }
+    }
+  );
+
+  /* -------------------------------------------------------
+     MOBILE FINAL BUTTON
+  ------------------------------------------------------- */
+
+  function createMobileMenuButton10() {
+    if (
+      document.querySelector(
+        "#m10-mobile-menu"
+      )
+    ) {
+      return;
+    }
+
+    const button =
+      document.createElement("button");
+
+    button.id =
+      "m10-mobile-menu";
+
+    button.textContent =
+      "☰";
+
+    Object.assign(
+      button.style,
+      {
+        position: "fixed",
+        right: "14px",
+        top: "14px",
+        width: "52px",
+        height: "52px",
+        borderRadius: "50%",
+        zIndex: "99980",
+        fontSize: "22px",
+        background:
+          "rgba(10,10,15,.85)",
+        color: "#fff",
+        border:
+          "1px solid rgba(255,255,255,.2)"
+      }
+    );
+
+    button.addEventListener(
+      "click",
+      openFinalMenu10
+    );
+
+    document.body.appendChild(
+      button
+    );
+  }
+
+  /* -------------------------------------------------------
+     VR MENU BRIDGE
+  ------------------------------------------------------- */
+
+  function integrateVRMenu10() {
+    window.MonkeyVRFinalMenu = {
+      open:
+        openFinalMenu10,
+      close:
+        closeFinalMenu10,
+      toggle:
+        () => {
+          if (
+            M10.menuOpen
+          ) {
+            closeFinalMenu10();
+          } else {
+            openFinalMenu10();
+          }
+        }
+    };
+
+    /*
+      Existing Part 2/VR menu systems can
+      call this bridge:
+
+      window.MonkeyVRFinalMenu.open()
+    */
+  }
+
+  /* -------------------------------------------------------
+     SESSION STATS
+  ------------------------------------------------------- */
+
+  function updateSessionStats10() {
+    const game =
+      window.Game;
+
+    if (
+      game?.stats
+    ) {
+      if (
+        typeof game.stats.rounds ===
+        "number"
+      ) {
+        M10.session.rounds =
+          game.stats.rounds;
+      }
+
+      if (
+        typeof game.stats.tags ===
+        "number"
+      ) {
+        M10.session.tags =
+          game.stats.tags;
+      }
+
+      if (
+        typeof game.stats.jumps ===
+        "number"
+      ) {
+        M10.session.jumps =
+          game.stats.jumps;
+      }
+    }
+
+    const creator =
+      window.MonkeyVRCreator;
+
+    if (
+      creator?.state?.objects
+    ) {
+      M10.session.objectsBuilt =
+        creator.state.objects.length;
+    }
+  }
+
+  function formatTime10(ms) {
+    const seconds =
+      Math.floor(
+        ms / 1000
+      );
+
+    const minutes =
+      Math.floor(
+        seconds / 60
+      );
+
+    const hours =
+      Math.floor(
+        minutes / 60
+      );
+
+    if (hours > 0) {
+      return (
+        hours +
+        "h " +
+        (minutes % 60) +
+        "m"
+      );
+    }
+
+    return (
+      minutes +
+      "m"
+    );
+  }
+
+  /* -------------------------------------------------------
+     FINAL LOOP
+  ------------------------------------------------------- */
+
+  let last10 =
+    performance.now();
+
+  function finalLoop10(now) {
+    updatePerformance10(
+      now
+    );
+
+    updateSessionStats10();
+
+    if (
+      now - last10 >
+      1000
+    ) {
+      applyPerformance10();
+      updatePerformanceInfo10();
+      last10 = now;
+    }
+
+    requestAnimationFrame(
+      finalLoop10
+    );
+  }
+
+  /* -------------------------------------------------------
+     STARTUP
+  ------------------------------------------------------- */
+
+  function finalStartup10() {
+    if (M10.booted) return;
+
+    M10.booted =
+      true;
+
+    loadFinalSettings10();
+
+    createFinalMenu10();
+
+    createMobileMenuButton10();
+
+    integrateVRMenu10();
+
+    applyPerformance10();
+
+    M10.loading =
+      false;
+
+    notify10(
+      "🐒 Monkey VR loaded!"
+    );
+
+    console.log(
+      "================================"
+    );
+
+    console.log(
+      "MONKEY VR CLIENT v10.0"
+    );
+
+    console.log(
+      "Parts 1-10 integrated"
+    );
+
+    console.log(
+      "================================"
+    );
+  }
+
+  if (
+    document.readyState ===
+    "loading"
+  ) {
+    document.addEventListener(
+      "DOMContentLoaded",
+      finalStartup10,
+      { once: true }
+    );
+  } else {
+    finalStartup10();
+  }
+
+  requestAnimationFrame(
+    finalLoop10
+  );
+
+  /* -------------------------------------------------------
+     PUBLIC FINAL API
+  ------------------------------------------------------- */
+
+  window.MonkeyVRFinal = {
+    version:
+      M10.version,
+
+    state:
+      M10,
+
+    openMenu:
+      openFinalMenu10,
+
+    closeMenu:
+      closeFinalMenu10,
+
+    toggleMenu:
+      () => {
+        if (
+          M10.menuOpen
+        ) {
+          closeFinalMenu10();
+        } else {
+          openFinalMenu10();
+        }
+      },
+
+    quickPlay:
+      quickPlay10,
+
+    save:
+      finalSave10,
+
+    performance:
+      applyPerformance10,
+
+    notify:
+      notify10
+  };
+
+})();
 </script>
 
 </body>

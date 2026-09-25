@@ -25448,6 +25448,370 @@ setTimeout(
   };
 
 })();
+      /* =========================================================
+   MONKEY VR — QUEST 3S MOVEMENT FIX
+   ========================================================= */
+
+(function () {
+  "use strict";
+
+  const rig =
+    document.querySelector("#rig") ||
+    document.querySelector("#playerRig");
+
+  const scene =
+    document.querySelector("a-scene");
+
+  if (!rig || !scene) {
+    console.warn(
+      "Monkey VR movement fix: player rig or scene not found."
+    );
+    return;
+  }
+
+  let leftX = 0;
+  let leftY = 0;
+
+  let rightX = 0;
+  let rightY = 0;
+
+  const SPEED = 2.8;
+
+  function getPosition() {
+    return rig.object3D.position;
+  }
+
+  function getCamera() {
+    return (
+      document.querySelector("[camera]") ||
+      document.querySelector("#camera")
+    );
+  }
+
+  function updateStick(axis, value) {
+    const v =
+      Number(value);
+
+    if (!Number.isFinite(v)) {
+      return;
+    }
+
+    if (axis === "leftX") {
+      leftX = v;
+    }
+
+    if (axis === "leftY") {
+      leftY = v;
+    }
+
+    if (axis === "rightX") {
+      rightX = v;
+    }
+
+    if (axis === "rightY") {
+      rightY = v;
+    }
+  }
+
+  function handleThumbstick(event) {
+    const detail =
+      event.detail || {};
+
+    const axis =
+      detail.axis;
+
+    if (
+      Array.isArray(axis) &&
+      axis.length >= 2
+    ) {
+      /*
+       * A-Frame commonly reports
+       * thumbstick axes as:
+       *
+       * [horizontal, vertical]
+       */
+
+      const x =
+        Number(axis[0]) || 0;
+
+      const y =
+        Number(axis[1]) || 0;
+
+      const controller =
+        event.target;
+
+      const hand =
+        controller?.getAttribute(
+          "hand-controls"
+        ) ||
+        controller?.getAttribute(
+          "oculus-touch-controls"
+        ) ||
+        controller?.getAttribute(
+          "meta-touch-controls"
+        );
+
+      const id =
+        controller?.id ||
+        "";
+
+      const isLeft =
+        String(id)
+          .toLowerCase()
+          .includes("left") ||
+        String(hand)
+          .toLowerCase()
+          .includes("left");
+
+      if (isLeft) {
+        leftX = x;
+        leftY = y;
+      } else {
+        rightX = x;
+        rightY = y;
+      }
+    }
+  }
+
+  /*
+   * Listen for several common A-Frame
+   * controller events.
+   */
+
+  [
+    "thumbstickmoved",
+    "axismove"
+  ].forEach(
+    eventName => {
+      scene.addEventListener(
+        eventName,
+        handleThumbstick
+      );
+    }
+  );
+
+  function movePlayer(dt) {
+    const position =
+      getPosition();
+
+    if (!position) {
+      return;
+    }
+
+    /*
+     * Deadzone prevents controller
+     * stick drift.
+     */
+
+    const deadzone =
+      0.15;
+
+    let x =
+      Math.abs(leftX) >
+      deadzone
+        ? leftX
+        : 0;
+
+    let y =
+      Math.abs(leftY) >
+      deadzone
+        ? leftY
+        : 0;
+
+    if (
+      x === 0 &&
+      y === 0
+    ) {
+      return;
+    }
+
+    const camera =
+      getCamera();
+
+    let forwardX = 0;
+    let forwardZ = -1;
+
+    let rightX = 1;
+    let rightZ = 0;
+
+    if (
+      camera &&
+      camera.object3D
+    ) {
+      const rotation =
+        camera.object3D.rotation.y;
+
+      forwardX =
+        -Math.sin(rotation);
+
+      forwardZ =
+        -Math.cos(rotation);
+
+      rightX =
+        Math.cos(rotation);
+
+      rightZ =
+        -Math.sin(rotation);
+    }
+
+    /*
+     * Stick forward/backward.
+     */
+
+    position.x +=
+      (
+        rightX * x +
+        forwardX * -y
+      ) *
+      SPEED *
+      dt;
+
+    position.z +=
+      (
+        rightZ * x +
+        forwardZ * -y
+      ) *
+      SPEED *
+      dt;
+  }
+
+  let last =
+    performance.now();
+
+  function movementLoop(now) {
+    const dt =
+      Math.min(
+        (now - last) / 1000,
+        0.05
+      );
+
+    last =
+      now;
+
+    movePlayer(dt);
+
+    requestAnimationFrame(
+      movementLoop
+    );
+  }
+
+  requestAnimationFrame(
+    movementLoop
+  );
+
+  /*
+   * Expose a small API so the rest
+   * of Monkey VR can use this movement.
+   */
+
+  window.MonkeyVRQuestMovement = {
+    getStickState() {
+      return {
+        leftX,
+        leftY,
+        rightX,
+        rightY
+      };
+    },
+
+    stop() {
+      leftX = 0;
+      leftY = 0;
+      rightX = 0;
+      rightY = 0;
+    }
+  };
+
+  console.log(
+    "🐒 Quest 3S movement fix loaded!"
+  );
+
+})();
+      /* =========================================================
+   MONKEY VR — GROUND / SPAWN FIX
+   ========================================================= */
+
+(function () {
+  "use strict";
+
+  const rig =
+    document.querySelector("#rig") ||
+    document.querySelector("#playerRig");
+
+  const scene =
+    document.querySelector("a-scene");
+
+  if (!rig || !scene) {
+    console.warn("Ground fix: rig/scene not found.");
+    return;
+  }
+
+  const START_Y = 1.6;
+  const FLOOR_Y = 0;
+
+  function fixSpawn() {
+    const p = rig.object3D.position;
+
+    if (
+      !Number.isFinite(p.x) ||
+      !Number.isFinite(p.y) ||
+      !Number.isFinite(p.z)
+    ) {
+      p.set(0, START_Y, 0);
+      return;
+    }
+
+    /*
+     * If the player starts ridiculously high,
+     * put them back at the spawn.
+     */
+    if (p.y > 8 || p.y < -5) {
+      p.set(0, START_Y, 0);
+    }
+
+    /*
+     * Prevent falling endlessly.
+     */
+    if (p.y < FLOOR_Y) {
+      p.y = START_Y;
+    }
+  }
+
+  function keepPlayerGrounded() {
+    const p = rig.object3D.position;
+
+    /*
+     * Don't force Y every frame while jumping.
+     * Only recover the player if they fall
+     * below the world.
+     */
+    if (p.y < -10) {
+      p.set(0, START_Y, 0);
+    }
+  }
+
+  fixSpawn();
+
+  setInterval(
+    keepPlayerGrounded,
+    250
+  );
+
+  window.MonkeyVRGroundFix = {
+    reset() {
+      rig.object3D.position.set(
+        0,
+        START_Y,
+        0
+      );
+    }
+  };
+
+  console.log(
+    "🐒 Ground/spawn fix loaded!"
+  );
+
+})();
 </script>
 
 </body>

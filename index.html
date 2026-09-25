@@ -26693,95 +26693,113 @@ setTimeout(
   };
 
   console.log(
-    "🐒 Quest 3S movement fix loaded!"
-  );
-
-})();
-      /* =========================================================
-   MONKEY VR — GROUND / SPAWN FIX
-   ========================================================= */
+    "🐒 Quest 3S movement fix"
+   /* ============================================================
+   MONKEY VR — HARD SPAWN / FLOOR FIX
+   ============================================================ */
 
 (function () {
-  "use strict";
-
-  const rig =
-    document.querySelector("#rig") ||
-    document.querySelector("#playerRig");
-
-  const scene =
-    document.querySelector("a-scene");
-
-  if (!rig || !scene) {
-    console.warn("Ground fix: rig/scene not found.");
-    return;
+  function findPlayerRig() {
+    return (
+      document.querySelector('#playerRig') ||
+      document.querySelector('#rig') ||
+      document.querySelector('[data-player-rig]') ||
+      document.querySelector('a-entity[wasd-controls]') ||
+      document.querySelector('a-entity[camera]')
+    );
   }
 
-  const START_Y = 1.6;
-  const FLOOR_Y = 0;
+  function findCamera() {
+    return (
+      document.querySelector('#playerCamera') ||
+      document.querySelector('#camera') ||
+      document.querySelector('[camera]')
+    );
+  }
+
+  function findFloor() {
+    return (
+      document.querySelector('#floor') ||
+      document.querySelector('[data-floor]') ||
+      document.querySelector('.ground')
+    );
+  }
 
   function fixSpawn() {
-    const p = rig.object3D.position;
+    const rig = findPlayerRig();
+    const camera = findCamera();
+    const floor = findFloor();
 
-    if (
-      !Number.isFinite(p.x) ||
-      !Number.isFinite(p.y) ||
-      !Number.isFinite(p.z)
-    ) {
-      p.set(0, START_Y, 0);
+    if (!rig) {
+      console.warn('MonkeyVR: player rig not found');
       return;
     }
 
     /*
-     * If the player starts ridiculously high,
-     * put them back at the spawn.
-     */
-    if (p.y > 8 || p.y < -5) {
-      p.set(0, START_Y, 0);
+      The PLAYER BODY sits on the floor.
+      The CAMERA is placed at normal standing/head height.
+    */
+
+    rig.object3D.position.x = 0;
+    rig.object3D.position.y = 0;
+    rig.object3D.position.z = 0;
+
+    rig.object3D.rotation.x = 0;
+    rig.object3D.rotation.z = 0;
+
+    /*
+      If the camera is directly inside the rig, give it
+      a normal starting height.
+    */
+    if (camera) {
+      const cameraParent = camera.parentElement;
+
+      if (cameraParent === rig) {
+        camera.object3D.position.y = 1.55;
+        camera.object3D.position.x = 0;
+        camera.object3D.position.z = 0;
+      }
     }
 
     /*
-     * Prevent falling endlessly.
-     */
-    if (p.y < FLOOR_Y) {
-      p.y = START_Y;
+      Make sure the floor is actually at Y=0.
+    */
+    if (floor) {
+      floor.object3D.position.y = 0;
+    }
+
+    console.log('🐒 MonkeyVR spawn fixed');
+  }
+
+  /*
+    Wait until A-Frame has finished creating the scene.
+  */
+  function startFix() {
+    const scene = document.querySelector('a-scene');
+
+    if (!scene) {
+      setTimeout(startFix, 250);
+      return;
+    }
+
+    if (scene.hasLoaded) {
+      setTimeout(fixSpawn, 100);
+    } else {
+      scene.addEventListener('loaded', function () {
+        setTimeout(fixSpawn, 100);
+      }, { once: true });
     }
   }
 
-  function keepPlayerGrounded() {
-    const p = rig.object3D.position;
+  startFix();
 
-    /*
-     * Don't force Y every frame while jumping.
-     * Only recover the player if they fall
-     * below the world.
-     */
-    if (p.y < -10) {
-      p.set(0, START_Y, 0);
-    }
-  }
-
-  fixSpawn();
-
-  setInterval(
-    keepPlayerGrounded,
-    250
-  );
-
-  window.MonkeyVRGroundFix = {
-    reset() {
-      rig.object3D.position.set(
-        0,
-        START_Y,
-        0
-      );
-    }
+  /*
+    Public function so other systems can respawn safely.
+  */
+  window.MonkeyVRSpawnFix = {
+    reset: fixSpawn
   };
-
-  console.log(
-    "🐒 Ground/spawn fix loaded!"
-  );
-
-})();
+})();     
 </script>
 
 </body>

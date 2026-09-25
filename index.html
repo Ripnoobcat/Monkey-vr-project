@@ -25449,6 +25449,976 @@ setTimeout(
 
 })();
       /* =========================================================
+   MONKEY VR — ORIGINAL ARM-SWING LOCOMOTION
+   Quest 3S controllers + hand tracking foundation
+   ========================================================= */
+
+(function () {
+  "use strict";
+
+  const rig =
+    document.querySelector("#rig") ||
+    document.querySelector("#playerRig");
+
+  const scene =
+    document.querySelector("a-scene");
+
+  if (!rig || !scene) {
+    console.warn(
+      "Arm locomotion: player rig or scene not found."
+    );
+    return;
+  }
+
+  const state = {
+    enabled: true,
+
+    velocity: {
+      x: 0,
+      y: 0,
+      z: 0
+    },
+
+    left: {
+      position: { x: 0, y: 0, z: 0 },
+      previous: { x: 0, y: 0, z: 0 },
+      velocity: { x: 0, y: 0, z: 0 },
+      touching: false
+    },
+
+    right: {
+      position: { x: 0, y: 0, z: 0 },
+      previous: { x: 0, y: 0, z: 0 },
+      velocity: { x: 0, y: 0, z: 0 },
+      touching: false
+    },
+
+    grounded: false,
+
+    gravity: -8.5,
+
+    pushStrength: 2.2,
+
+    maxSpeed: 7.0,
+
+    friction: 0.88,
+
+    airFriction: 0.985,
+
+    jumpBoost: 3.0,
+
+    handRadius: 0.16,
+
+    lastTime: performance.now()
+  };
+
+  /* -------------------------------------------------------
+     HELPERS
+     ------------------------------------------------------- */
+
+  function clamp(v, min, max) {
+    return Math.max(
+      min,
+      Math.min(max, v)
+    );
+  }
+
+  function length(v) {
+    return Math.sqrt(
+      v.x * v.x +
+      v.y * v.y +
+      v.z * v.z
+    );
+  }
+
+  function copy(a) {
+    return {
+      x: a.x,
+      y: a.y,
+      z: a.z
+    };
+  }
+
+  function subtract(a, b) {
+    return {
+      x: a.x - b.x,
+      y: a.y - b.y,
+      z: a.z - b.z
+    };
+  }
+
+  function add(a, b) {
+    return {
+      x: a.x + b.x,
+      y: a.y + b.y,
+      z: a.z + b.z
+    };
+  }
+
+  function multiply(v, n) {
+    return {
+      x: v.x * n,
+      y: v.y * n,
+      z: v.z * n
+    };
+  }
+
+  /* -------------------------------------------------------
+     GET WORLD POSITION
+     ------------------------------------------------------- */
+
+  function worldPosition(entity) {
+    if (
+      !entity ||
+      !entity.object3D
+    ) {
+      return null;
+    }
+
+    const p =
+      new THREE.Vector3();
+
+    entity.object3D.getWorldPosition(
+      p
+    );
+
+    return {
+      x: p.x,
+      y: p.y,
+      z: p.z
+    };
+  }
+
+  /* -------------------------------------------------------
+     FIND HANDS
+     ------------------------------------------------------- */
+
+  function findHand(side) {
+    const selectors =
+      side === "left"
+        ? [
+            "#leftHand",
+            "#hand-left",
+            "[hand-controls='left']",
+            "[oculus-touch-controls='hand: left']",
+            "[laser-controls='hand: left']"
+          ]
+        : [
+            "#rightHand",
+            "#hand-right",
+            "[hand-controls='right']",
+            "[oculus-touch-controls='hand: right']",
+            "[laser-controls='hand: right']"
+          ];
+
+    for (
+      const selector of selectors
+    ) {
+      const found =
+        document.querySelector(
+          selector
+        );
+
+      if (found) {
+        return found;
+      }
+    }
+
+    return null;
+  }
+
+  let leftHand =
+    findHand("left");
+
+  let rightHand =
+    findHand("right");
+
+  /* -------------------------------------------------------
+     CONTROLLER FALLBACK
+     ------------------------------------------------------- */
+
+  function discoverHands() {
+    if (!leftHand) {
+      leftHand =
+        findHand("left");
+    }
+
+    if (!rightHand) {
+      rightHand =
+        findHand("right");
+    }
+
+    /*
+     * Look for generic controller
+     * entities if the project uses
+     * different IDs.
+     */
+
+    if (
+      !leftHand ||
+      !rightHand
+    ) {
+      const candidates =
+        Array.from(
+          scene.querySelectorAll(
+            "[laser-controls],[hand-controls],[oculus-touch-controls]"
+          )
+        );
+
+      for (
+        const entity of candidates
+      ) {
+        const text =
+          (
+            entity.id +
+            " " +
+            JSON.stringify(
+              entity.getAttribute(
+                "laser-controls"
+              ) || {}
+            ) +
+            " " +
+            JSON.stringify(
+              entity.getAttribute(
+                "hand-controls"
+              ) || {}
+            )
+          ).toLowerCase();
+
+        if (
+          text.includes("left") &&
+          !leftHand
+        ) {
+          leftHand =
+            entity;
+        }
+
+        if (
+          text.includes("right") &&
+          !rightHand
+        ) {
+          rightHand =
+            entity;
+        }
+      }
+    }
+  }
+
+  /* -------------------------------------------------------
+     HAND VELOCITY
+     ------------------------------------------------------- */
+
+  function updateHand(
+    handState,
+    entity,
+    dt
+  ) {
+    if (!entity) {
+      handState.touching =
+        false;
+      return;
+    }
+
+    const p =
+      worldPosition(entity);
+
+    if (!p) {
+      handState.touching =
+        false;
+      return;
+    }
+
+    handState.previous =
+      copy(
+        handState.position
+      );
+
+    handState.position =
+      p;
+
+    if (dt > 0) {
+      handState.velocity =
+        multiply(
+          subtract(
+            handState.position,
+            handState.previous
+          ),
+          1 / dt
+        );
+    }
+
+    /*
+     * Very high values can happen
+     * when tracking jumps suddenly.
+     * Clamp them so one tracking
+     * glitch doesn't launch the player.
+     */
+
+    const speed =
+      length(
+        handState.velocity
+      );
+
+    if (speed > 12) {
+      handState.velocity =
+        multiply(
+          handState.velocity,
+          12 / speed
+        );
+    }
+  }
+
+  /* -------------------------------------------------------
+     SIMPLE SURFACE DETECTION
+     ------------------------------------------------------- */
+
+  function isNearGround(p) {
+    if (!p) return false;
+
+    return (
+      p.y <= 0.35
+    );
+  }
+
+  function isNearObject(
+    handPosition
+  ) {
+    if (!handPosition) {
+      return false;
+    }
+
+    /*
+     * Use a conservative collision
+     * check against visible static
+     * objects in the world.
+     */
+
+    const objects =
+      scene.querySelectorAll(
+        "[data-collidable]"
+      );
+
+    for (
+      const object of objects
+    ) {
+      if (
+        !object.object3D
+      ) {
+        continue;
+      }
+
+      const p =
+        worldPosition(
+          object
+        );
+
+      if (!p) continue;
+
+      const dx =
+        handPosition.x -
+        p.x;
+
+      const dy =
+        handPosition.y -
+        p.y;
+
+      const dz =
+        handPosition.z -
+        p.z;
+
+      const distance =
+        Math.sqrt(
+          dx * dx +
+          dy * dy +
+          dz * dz
+        );
+
+      if (
+        distance <
+        0.65
+      ) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /* -------------------------------------------------------
+     ARM PUSH
+     ------------------------------------------------------- */
+
+  function applyHandPush(
+    handState,
+    dt
+  ) {
+    if (!handState) {
+      return;
+    }
+
+    const movement =
+      handState.velocity;
+
+    const speed =
+      length(movement);
+
+    if (
+      speed < 0.08
+    ) {
+      return;
+    }
+
+    /*
+     * Moving your hand backwards
+     * creates forward body movement.
+     *
+     * This is intentionally an
+     * original implementation rather
+     * than copied game code.
+     */
+
+    const push =
+      multiply(
+        movement,
+        -state.pushStrength
+      );
+
+    state.velocity.x +=
+      push.x * dt;
+
+    state.velocity.y +=
+      push.y * dt;
+
+    state.velocity.z +=
+      push.z * dt;
+  }
+
+  /* -------------------------------------------------------
+     GROUND PUSH
+     ------------------------------------------------------- */
+
+  function applyGroundPush(
+    handState
+  ) {
+    if (!handState) {
+      return;
+    }
+
+    const p =
+      handState.position;
+
+    if (
+      !isNearGround(p)
+    ) {
+      return;
+    }
+
+    const handSpeed =
+      length(
+        handState.velocity
+      );
+
+    if (
+      handSpeed < 1.0
+    ) {
+      return;
+    }
+
+    /*
+     * Strong downward hand movement
+     * can launch the player upward.
+     */
+
+    if (
+      handState.velocity.y <
+      -1.2
+    ) {
+      state.velocity.y +=
+        Math.min(
+          -handState.velocity.y *
+          0.45,
+          state.jumpBoost
+        );
+    }
+  }
+
+  /* -------------------------------------------------------
+     WALL / OBJECT PUSH
+     ------------------------------------------------------- */
+
+  function applySurfacePush(
+    handState,
+    dt
+  ) {
+    if (!handState) {
+      return;
+    }
+
+    if (
+      !isNearObject(
+        handState.position
+      )
+    ) {
+      return;
+    }
+
+    const movement =
+      handState.velocity;
+
+    const speed =
+      length(movement);
+
+    if (
+      speed < 0.25
+    ) {
+      return;
+    }
+
+    state.velocity.x +=
+      -movement.x *
+      state.pushStrength *
+      dt;
+
+    state.velocity.y +=
+      -movement.y *
+      state.pushStrength *
+      dt;
+
+    state.velocity.z +=
+      -movement.z *
+      state.pushStrength *
+      dt;
+  }
+
+  /* -------------------------------------------------------
+     APPLY PLAYER MOVEMENT
+     ------------------------------------------------------- */
+
+  function movePlayer(dt) {
+    const p =
+      rig.object3D.position;
+
+    if (!p) {
+      return;
+    }
+
+    /*
+     * Gravity.
+     */
+
+    if (
+      !state.grounded
+    ) {
+      state.velocity.y +=
+        state.gravity *
+        dt;
+    }
+
+    /*
+     * Limit total speed.
+     */
+
+    const horizontalSpeed =
+      Math.sqrt(
+        state.velocity.x *
+          state.velocity.x +
+        state.velocity.z *
+          state.velocity.z
+      );
+
+    if (
+      horizontalSpeed >
+      state.maxSpeed
+    ) {
+      const scale =
+        state.maxSpeed /
+        horizontalSpeed;
+
+      state.velocity.x *=
+        scale;
+
+      state.velocity.z *=
+        scale;
+    }
+
+    /*
+     * Move body.
+     */
+
+    p.x +=
+      state.velocity.x *
+      dt;
+
+    p.y +=
+      state.velocity.y *
+      dt;
+
+    p.z +=
+      state.velocity.z *
+      dt;
+
+    /*
+     * Ground collision.
+     */
+
+    const ground =
+      0;
+
+    if (
+      p.y <= ground
+    ) {
+      p.y =
+        ground;
+
+      if (
+        state.velocity.y <
+        0
+      ) {
+        state.velocity.y =
+          0;
+      }
+
+      state.grounded =
+        true;
+    } else {
+      state.grounded =
+        false;
+    }
+
+    /*
+     * Friction.
+     */
+
+    const friction =
+      state.grounded
+        ? state.friction
+        : state.airFriction;
+
+    state.velocity.x *=
+      Math.pow(
+        friction,
+        dt * 60
+      );
+
+    state.velocity.z *=
+      Math.pow(
+        friction,
+        dt * 60
+      );
+  }
+
+  /* -------------------------------------------------------
+     MAIN LOOP
+     ------------------------------------------------------- */
+
+  function armMovementLoop(now) {
+    const dt =
+      Math.min(
+        Math.max(
+          (now -
+            state.lastTime) /
+            1000,
+          0.001
+        ),
+        0.05
+      );
+
+    state.lastTime =
+      now;
+
+    discoverHands();
+
+    updateHand(
+      state.left,
+      leftHand,
+      dt
+    );
+
+    updateHand(
+      state.right,
+      rightHand,
+      dt
+    );
+
+    if (
+      state.enabled
+    ) {
+      applyHandPush(
+        state.left,
+        dt
+      );
+
+      applyHandPush(
+        state.right,
+        dt
+      );
+
+      applyGroundPush(
+        state.left
+      );
+
+      applyGroundPush(
+        state.right
+      );
+
+      applySurfacePush(
+        state.left,
+        dt
+      );
+
+      applySurfacePush(
+        state.right,
+        dt
+      );
+
+      movePlayer(dt);
+    }
+
+    requestAnimationFrame(
+      armMovementLoop
+    );
+  }
+
+  /* -------------------------------------------------------
+     KEYBOARD TEST MODE
+     ------------------------------------------------------- */
+
+  const keys = {};
+
+  window.addEventListener(
+    "keydown",
+    event => {
+      keys[
+        event.key.toLowerCase()
+      ] = true;
+    }
+  );
+
+  window.addEventListener(
+    "keyup",
+    event => {
+      keys[
+        event.key.toLowerCase()
+      ] = false;
+    }
+  );
+
+  /*
+   * PC fallback:
+   * hold W/S/A/D to push the
+   * virtual body around.
+   */
+
+  function keyboardFallback(
+    dt
+  ) {
+    if (
+      !keys.w &&
+      !keys.a &&
+      !keys.s &&
+      !keys.d
+    ) {
+      return;
+    }
+
+    const x =
+      (keys.d ? 1 : 0) -
+      (keys.a ? 1 : 0);
+
+    const z =
+      (keys.s ? 1 : 0) -
+      (keys.w ? 1 : 0);
+
+    state.velocity.x +=
+      x *
+      3 *
+      dt;
+
+    state.velocity.z +=
+      z *
+      3 *
+      dt;
+
+    if (
+      keys[" "] &&
+      state.grounded
+    ) {
+      state.velocity.y =
+        4.2;
+    }
+  }
+
+  /*
+   * Add keyboard fallback to
+   * movement without replacing
+   * arm locomotion.
+   */
+
+  const originalMove =
+    movePlayer;
+
+  function combinedMovement(dt) {
+    keyboardFallback(dt);
+
+    originalMove(dt);
+  }
+
+  /*
+   * Replace internal movement
+   * reference by wrapping the
+   * animation loop.
+   */
+
+  function combinedLoop(now) {
+    const dt =
+      Math.min(
+        Math.max(
+          (now -
+            state.lastTime) /
+            1000,
+          0.001
+        ),
+        0.05
+      );
+
+    state.lastTime =
+      now;
+
+    discoverHands();
+
+    updateHand(
+      state.left,
+      leftHand,
+      dt
+    );
+
+    updateHand(
+      state.right,
+      rightHand,
+      dt
+    );
+
+    if (
+      state.enabled
+    ) {
+      applyHandPush(
+        state.left,
+        dt
+      );
+
+      applyHandPush(
+        state.right,
+        dt
+      );
+
+      applyGroundPush(
+        state.left
+      );
+
+      applyGroundPush(
+        state.right
+      );
+
+      applySurfacePush(
+        state.left,
+        dt
+      );
+
+      applySurfacePush(
+        state.right,
+        dt
+      );
+
+      keyboardFallback(
+        dt
+      );
+
+      originalMove(
+        dt
+      );
+    }
+
+    requestAnimationFrame(
+      combinedLoop
+    );
+  }
+
+  /* -------------------------------------------------------
+     PUBLIC API
+     ------------------------------------------------------- */
+
+  window.MonkeyVRArmMovement = {
+
+    state,
+
+    enable() {
+      state.enabled =
+        true;
+    },
+
+    disable() {
+      state.enabled =
+        false;
+
+      state.velocity.x =
+        0;
+
+      state.velocity.y =
+        0;
+
+      state.velocity.z =
+        0;
+    },
+
+    reset() {
+      state.velocity.x =
+        0;
+
+      state.velocity.y =
+        0;
+
+      state.velocity.z =
+        0;
+
+      rig.object3D.position.y =
+        0;
+    },
+
+    setPushStrength(value) {
+      state.pushStrength =
+        clamp(
+          Number(value) || 2.2,
+          0.2,
+          6
+        );
+    },
+
+    setMaxSpeed(value) {
+      state.maxSpeed =
+        clamp(
+          Number(value) || 7,
+          1,
+          15
+        );
+    },
+
+    getVelocity() {
+      return copy(
+        state.velocity
+      );
+    }
+  };
+
+  console.log(
+    "🐒 Original arm-swing locomotion loaded!"
+  );
+
+  requestAnimationFrame(
+    combinedLoop
+  );
+
+})();
+      /* =========================================================
    MONKEY VR — QUEST 3S MOVEMENT FIX
    ========================================================= */
 
